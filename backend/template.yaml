@@ -1,0 +1,98 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Aegis Backend
+
+Parameters:
+  VisualEvidenceUrl:
+    Type: String
+    Default: ""
+  ClaimIntelligenceUrl:
+    Type: String
+    Default: ""
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.13
+    MemorySize: 512
+
+Resources:
+  ClaimsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: aegis_claims
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: claim_id
+          AttributeType: S
+        - AttributeName: customer_id
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: claim_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: customer-index
+          KeySchema:
+            - AttributeName: customer_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  EvidenceBucket:
+    Type: AWS::S3::Bucket
+
+  OrchestratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ClaimsTable
+          BUCKET_NAME: !Ref EvidenceBucket
+          VISUAL_EVIDENCE_URL: !Ref VisualEvidenceUrl
+          CLAIM_INTELLIGENCE_URL: !Ref ClaimIntelligenceUrl
+          MODEL_ID: amazon.nova-pro-v1:0
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ClaimsTable
+        - S3CrudPolicy:
+            BucketName: !Ref EvidenceBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: "*"
+      Events:
+        SubmitClaim:
+          Type: Api
+          Properties:
+            Path: /claims
+            Method: post
+        GetClaim:
+          Type: Api
+          Properties:
+            Path: /claims/{claim_id}
+            Method: get
+        ListClaims:
+          Type: Api
+          Properties:
+            Path: /claims
+            Method: get
+        GetUploadUrl:
+          Type: Api
+          Properties:
+            Path: /uploads
+            Method: post
+
+Outputs:
+  ApiUrl:
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  TableName:
+    Value: !Ref ClaimsTable
+  BucketName:
+    Value: !Ref EvidenceBucket

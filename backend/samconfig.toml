@@ -1,0 +1,13 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "aegis-backend"
+resolve_s3 = true
+s3_prefix = "aegis-backend"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "VisualEvidenceUrl=\"\" ClaimIntelligenceUrl=\"\""
+image_repositories = []
+
+[default.global.parameters]
+region = "us-east-1"

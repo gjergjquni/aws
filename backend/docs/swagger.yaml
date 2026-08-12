@@ -1,0 +1,73 @@
+openapi: 3.0.0
+info:
+  title: Aegis Backend API
+  version: 1.0.0
+  description: AI-powered return fraud detection system
+servers:
+  - url: https://q7phgdg1m5.execute-api.us-east-1.amazonaws.com/Prod
+paths:
+  /claims:
+    post:
+      summary: Submit a claim for fraud analysis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                customer_id:
+                  type: string
+                  example: "CUST-001"
+                product_category:
+                  type: string
+                  example: "electronics"
+                order_value_usd:
+                  type: number
+                  example: 999
+                customer_text:
+                  type: string
+                  example: "I received this broken laptop yesterday. I need a refund immediately."
+      responses:
+        '200':
+          description: Fraud analysis result with score and recommendation
+    get:
+      summary: List claims by customer
+      parameters:
+        - name: customer_id
+          in: query
+          required: true
+          schema:
+            type: string
+          example: "CUST-001"
+      responses:
+        '200':
+          description: List of claims for that customer
+  /claims/{claim_id}:
+    get:
+      summary: Get a specific claim
+      parameters:
+        - name: claim_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Full claim details
+  /uploads:
+    post:
+      summary: Get presigned S3 URL for image upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                claim_id:
+                  type: string
+                  example: "test-123"
+      responses:
+        '200':
+          description: Presigned upload URL and S3 key

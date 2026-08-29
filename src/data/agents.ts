@@ -44,24 +44,3 @@ export const roadmapAgents: AgentDefinition[] = [
     status: "roadmap",
   },
 ];
-
-export const analysisStages = [
-  {
-    key: "visual",
-    label: "Visual Evidence Agent",
-    description:
-      "Analyzing uploaded image for manipulation indicators and metadata",
-  },
-  {
-    key: "claim",
-    label: "Claim Intelligence Agent",
-    description:
-      "Analyzing customer explanation for patterns and inconsistencies",
-  },
-  {
-    key: "orchestrator",
-    label: "Orchestrator",
-    description:
-      "Combining evidence and calculating overall risk assessment",
-  },
-];

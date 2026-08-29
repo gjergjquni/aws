@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { Link, useParams, useNavigate } from "react-router";
 import LoadingState from "@/components/LoadingState";
+import LiveCaseDetail from "@/features/cases/LiveCaseDetail";
 import { useAuth } from "@/hooks/useAuth";
 import { useInvestigation } from "@/hooks/useInvestigations";
+import { caseRegistry } from "@/services/caseRegistry";
 import { investigationsApi } from "@/services/investigationsApi";
 import type { HumanDecision, Investigation } from "@/types";
 import { getRiskColorScheme } from "@/utils/risk";
@@ -552,6 +554,22 @@ function AuditTab({ inv }: { inv: Investigation }) {
 
 export default function InvestigationDetail() {
   const { id } = useParams();
+
+  // Cases created through the real backend (POST /analyze) have IDs like
+  // "CASE-…" and/or are tracked in the local case registry. They render the
+  // live, backend-driven view; legacy seed records keep the original page.
+  const isLiveCase =
+    Boolean(id) &&
+    (Boolean(caseRegistry.get(id)) || /^case-/i.test(id ?? ""));
+
+  if (isLiveCase && id) {
+    return <LiveCaseDetail key={id} caseId={id} />;
+  }
+
+  return <LegacyInvestigationDetail key={id} id={id} />;
+}
+
+function LegacyInvestigationDetail({ id }: { id: string | undefined }) {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { investigation: inv, loading, reload } = useInvestigation(id);

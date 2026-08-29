@@ -1,32 +1,156 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { analysisStages } from "@/data/agents";
-import { analysisApi } from "@/services/analysisApi";
-import { investigationsApi } from "@/services/investigationsApi";
-import type { CreateInvestigationInput, InvestigationCategory } from "@/types";
+import { caseRegistry } from "@/services/caseRegistry";
+import { claimsApi } from "@/services/claimsApi";
 
-type Stage = "form" | "analyzing" | "done";
+interface SubmissionInput {
+  category: string;
+  orderValue: number;
+  explanation: string;
+  imageFile: File | null;
+}
 
-function AnalyzingState({
+type StepState = "waiting" | "active" | "done" | "error" | "skipped";
+
+interface SubmissionStep {
+  key: string;
+  label: string;
+  description: string;
+  state: StepState;
+}
+
+function stepVisual(state: StepState, index: number) {
+  if (state === "done") {
+    return (
+      <span className="w-6 h-6 rounded-full bg-green-500 text-white flex items-center justify-center flex-shrink-0 mt-0.5">
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+      </span>
+    );
+  }
+  if (state === "active") {
+    return (
+      <span className="w-6 h-6 rounded-full bg-[var(--primary)] text-white flex items-center justify-center flex-shrink-0 mt-0.5">
+        <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
+      </span>
+    );
+  }
+  if (state === "error") {
+    return (
+      <span className="w-6 h-6 rounded-full bg-red-500 text-white flex items-center justify-center flex-shrink-0 mt-0.5 text-xs font-bold">!</span>
+    );
+  }
+  return (
+    <span className="w-6 h-6 rounded-full bg-[var(--border)] text-[var(--muted-foreground)] flex items-center justify-center flex-shrink-0 mt-0.5">
+      <span className="text-xs font-mono">{index + 1}</span>
+    </span>
+  );
+}
+
+/**
+ * Runs the real submission pipeline: presigned upload URL → S3 PUT →
+ * POST /analyze. Every step shown corresponds to an actual request; no
+ * progress is simulated.
+ */
+function SubmittingState({
   input,
   onComplete,
+  onBack,
 }: {
-  input: CreateInvestigationInput;
-  onComplete: (id: string) => void;
+  input: SubmissionInput;
+  onComplete: (caseId: string) => void;
+  onBack: () => void;
 }) {
-  const [step, setStep] = useState(0);
-
-  const runAnalysis = useCallback(async () => {
-    const result = await analysisApi.runAnalysis(input, (stageIndex) => {
-      setStep(stageIndex + 1);
+  const [steps, setSteps] = useState<SubmissionStep[]>(() => {
+    const list: SubmissionStep[] = [];
+    if (input.imageFile) {
+      list.push({
+        key: "upload-url",
+        label: "Requesting secure upload URL",
+        description: "POST /uploads — presigned S3 URL from the backend",
+        state: "waiting",
+      });
+      list.push({
+        key: "s3-upload",
+        label: "Uploading evidence to S3",
+        description: "Direct PUT to the presigned S3 URL",
+        state: "waiting",
+      });
+    }
+    list.push({
+      key: "analyze",
+      label: "Submitting case for analysis",
+      description: "POST /analyze — backend dispatches Agent 1 and Agent 3",
+      state: "waiting",
     });
-    const created = await investigationsApi.create(input, result);
-    onComplete(created.id);
-  }, [input, onComplete]);
+    return list;
+  });
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const startedRef = useRef(false);
 
   useEffect(() => {
-    runAnalysis();
-  }, [runAnalysis]);
+    if (startedRef.current) return;
+    startedRef.current = true;
+    let cancelled = false;
+
+    const setStepState = (key: string, state: StepState) => {
+      if (cancelled) return;
+      setSteps((prev) => prev.map((s) => (s.key === key ? { ...s, state } : s)));
+    };
+
+    const run = async () => {
+      let s3Key: string | null = null;
+      let uploadCompletedAt: string | null = null;
+
+      try {
+        if (input.imageFile) {
+          setStepState("upload-url", "active");
+          const ticket = await claimsApi.requestUploadUrl(crypto.randomUUID());
+          setStepState("upload-url", "done");
+
+          setStepState("s3-upload", "active");
+          await claimsApi.uploadEvidenceImage(ticket, input.imageFile);
+          s3Key = ticket.s3_key;
+          uploadCompletedAt = new Date().toISOString();
+          setStepState("s3-upload", "done");
+        }
+
+        setStepState("analyze", "active");
+        const submitted = await claimsApi.createCase({
+          message: input.explanation,
+          s3Key,
+          productCategory: input.category,
+          orderValueUsd: input.orderValue,
+        });
+        setStepState("analyze", "done");
+
+        caseRegistry.save({
+          caseId: submitted.case_id,
+          message: input.explanation,
+          category: input.category,
+          orderValueUsd: input.orderValue,
+          s3Key,
+          imageName: input.imageFile?.name ?? null,
+          uploadCompletedAt,
+          submittedAt: new Date().toISOString(),
+          lastStatus: submitted.status,
+        });
+
+        if (!cancelled) onComplete(submitted.case_id);
+      } catch (err) {
+        if (cancelled) return;
+        setSteps((prev) =>
+          prev.map((s) => (s.state === "active" ? { ...s, state: "error" } : s)),
+        );
+        setError(err instanceof Error ? err.message : "Submission failed.");
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [input, onComplete, attempt]);
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] px-6">
@@ -41,55 +165,70 @@ function AnalyzingState({
               <circle cx="5.8" cy="14" r="1.5" fill="currentColor" fillOpacity="0.6" />
             </svg>
           </div>
-          <h2 className="text-lg font-semibold text-[var(--foreground)]">Analyzing Investigation</h2>
-          <p className="text-sm text-[var(--muted-foreground)] mt-1">AI agents are reviewing the submitted evidence.</p>
+          <h2 className="text-lg font-semibold text-[var(--foreground)]">Submitting Investigation</h2>
+          <p className="text-sm text-[var(--muted-foreground)] mt-1">
+            Sending the claim to the fraud-analysis backend.
+          </p>
         </div>
 
         <div className="space-y-4">
-          {analysisStages.map((agent, i) => {
-            const isDone = step > i;
-            const isActive = step === i;
-            return (
-              <div
-                key={agent.key}
-                className={`flex items-start gap-3 p-4 rounded-[var(--radius-lg)] border transition-all duration-300 ${
-                  isDone
-                    ? 'border-green-200 dark:border-green-800 bg-green-50/50 dark:bg-green-950/20'
-                    : isActive
-                    ? 'border-[var(--primary)] bg-[var(--accent)]'
-                    : 'border-[var(--border)] bg-[var(--card)] opacity-50'
-                }`}
-              >
-                <div className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 transition-colors ${
-                  isDone ? 'bg-green-500 text-white' : isActive ? 'bg-[var(--primary)] text-white' : 'bg-[var(--border)] text-[var(--muted-foreground)]'
-                }`}>
-                  {isDone ? (
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                  ) : isActive ? (
-                    <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
-                  ) : (
-                    <span className="text-xs font-mono">{i + 1}</span>
-                  )}
+          {steps.map((step, i) => (
+            <div
+              key={step.key}
+              className={`flex items-start gap-3 p-4 rounded-[var(--radius-lg)] border transition-all duration-300 ${
+                step.state === "done"
+                  ? "border-green-200 dark:border-green-800 bg-green-50/50 dark:bg-green-950/20"
+                  : step.state === "active"
+                  ? "border-[var(--primary)] bg-[var(--accent)]"
+                  : step.state === "error"
+                  ? "border-red-300 dark:border-red-800 bg-red-50/50 dark:bg-red-950/20"
+                  : "border-[var(--border)] bg-[var(--card)] opacity-50"
+              }`}
+            >
+              {stepVisual(step.state, i)}
+              <div>
+                <div className={`text-sm font-medium ${step.state === "waiting" ? "text-[var(--muted-foreground)]" : "text-[var(--foreground)]"}`}>
+                  {step.label}
                 </div>
-                <div>
-                  <div className={`text-sm font-medium ${isActive || isDone ? 'text-[var(--foreground)]' : 'text-[var(--muted-foreground)]'}`}>
-                    {agent.label}
-                  </div>
-                  <div className="text-xs text-[var(--muted-foreground)] mt-0.5">{agent.description}</div>
-                  {isActive && (
-                    <div className="mt-2 h-1 bg-[var(--border)] rounded-full overflow-hidden w-32">
-                      <div className="h-full bg-[var(--primary)] rounded-full animate-[progress_1.4s_ease-in-out_forwards]" style={{ width: '70%' }} />
-                    </div>
-                  )}
-                </div>
+                <div className="text-xs text-[var(--muted-foreground)] mt-0.5">{step.description}</div>
               </div>
-            );
-          })}
+            </div>
+          ))}
         </div>
 
-        <p className="text-center text-xs text-[var(--muted-foreground)] mt-8">
-          Processing securely with Amazon Nova Pro
-        </p>
+        {error && (
+          <div className="mt-6 p-4 rounded-[var(--radius-lg)] border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/20">
+            <div className="text-sm font-medium text-red-700 dark:text-red-400 mb-1">Submission failed</div>
+            <p className="text-xs text-red-600 dark:text-red-400 leading-relaxed">{error}</p>
+            <div className="flex gap-2 mt-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  setSteps((prev) => prev.map((s) => ({ ...s, state: "waiting" })));
+                  startedRef.current = false;
+                  setAttempt((a) => a + 1);
+                }}
+                className="px-3 py-1.5 text-xs font-semibold rounded-[var(--radius)] bg-[var(--primary)] text-white hover:opacity-90"
+              >
+                Retry
+              </button>
+              <button
+                type="button"
+                onClick={onBack}
+                className="px-3 py-1.5 text-xs font-medium rounded-[var(--radius)] border border-[var(--border)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
+              >
+                Back to form
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!error && (
+          <p className="text-center text-xs text-[var(--muted-foreground)] mt-8">
+            The case ID is assigned by the backend once the claim is accepted.
+          </p>
+        )}
       </div>
     </div>
   );
@@ -99,10 +238,9 @@ export default function NewInvestigation() {
   const navigate = useNavigate();
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const [stage, setStage] = useState<Stage>("form");
-  const [pendingInput, setPendingInput] = useState<CreateInvestigationInput | null>(null);
+  const [stage, setStage] = useState<"form" | "submitting">("form");
+  const [pendingInput, setPendingInput] = useState<SubmissionInput | null>(null);
   const [form, setForm] = useState({
-    claimId: `CLM-00${Math.floor(Math.random() * 90 + 10)}`,
     category: '',
     orderValue: '',
     explanation: '',
@@ -130,23 +268,21 @@ export default function NewInvestigation() {
     e.preventDefault();
     if (!validate()) return;
 
-    const input: CreateInvestigationInput = {
-      product: `Return claim — ${form.category}`,
-      category: form.category as InvestigationCategory,
+    setPendingInput({
+      category: form.category,
       orderValue: Number(form.orderValue),
-      customerExplanation: form.explanation,
-      imageUrl: image?.preview ?? null,
-    };
-
-    setPendingInput(input);
-    setStage("analyzing");
+      explanation: form.explanation,
+      imageFile: image?.file ?? null,
+    });
+    setStage("submitting");
   };
 
-  if (stage === "analyzing" && pendingInput) {
+  if (stage === "submitting" && pendingInput) {
     return (
-      <AnalyzingState
+      <SubmittingState
         input={pendingInput}
-        onComplete={(id) => navigate(`/investigations/${id}`)}
+        onComplete={(caseId) => navigate(`/investigations/${caseId}`)}
+        onBack={() => setStage("form")}
       />
     );
   }
@@ -164,10 +300,10 @@ export default function NewInvestigation() {
           <h3 className="text-sm font-semibold text-[var(--foreground)] mb-4">1. Claim Details</h3>
           <div className="grid sm:grid-cols-3 gap-4">
             <div>
-              <label className="block text-xs font-medium text-[var(--foreground)] mb-1.5">Claim ID</label>
+              <label className="block text-xs font-medium text-[var(--foreground)] mb-1.5">Case ID</label>
               <input
                 type="text"
-                value={form.claimId}
+                value="Assigned by backend"
                 readOnly
                 className="w-full px-3 py-2 text-sm bg-[var(--muted)] border border-[var(--border)] rounded-[var(--radius)] text-[var(--muted-foreground)] font-mono"
               />

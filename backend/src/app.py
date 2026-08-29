@@ -4,7 +4,7 @@ import uuid
 import boto3
 from datetime import datetime, timezone
 from decimal import Decimal
-from remote import call_jeta_orchestrator
+from remote import call_jeta_orchestrator, proxy_request
 
 dynamodb = boto3.resource("dynamodb")
 s3 = boto3.client("s3")
@@ -50,6 +50,22 @@ def lambda_handler(event, context):
             return respond(400, {"error": "customer_id query param required"})
         elif path == "/uploads" and method == "POST":
             return handle_upload(event)
+        # Proxy endpoints: forward to the Agent API with the x-api-key
+        # attached server-side so the browser never holds the key.
+        elif path == "/analyze" and method == "POST":
+            status, body = proxy_request("POST", "/analyze", json.loads(event.get("body") or "{}"))
+            return respond(status, body)
+        elif path.startswith("/analyze/") and method == "GET":
+            case_id = path.split("/")[-1]
+            status, body = proxy_request("GET", f"/analyze/{case_id}")
+            return respond(status, body)
+        elif path == "/reviews/pending" and method == "GET":
+            status, body = proxy_request("GET", "/reviews/pending")
+            return respond(status, body)
+        elif path.startswith("/reviews/") and path.endswith("/decision") and method == "POST":
+            case_id = path.split("/")[2]
+            status, body = proxy_request("POST", f"/reviews/{case_id}/decision", json.loads(event.get("body") or "{}"))
+            return respond(status, body)
         else:
             return respond(404, {"error": "not found"})
     except Exception as e:
@@ -137,10 +153,14 @@ def handle_list_by_customer(customer_id):
 def handle_upload(event):
     body = json.loads(event.get("body", "{}"))
     claim_id = body.get("claim_id", str(uuid.uuid4()))
-    key = f"evidence/{claim_id}/{uuid.uuid4()}.jpg"
+    # UPLOAD_BUCKET/UPLOAD_PREFIX let uploads target the Agent API evidence
+    # bucket (prefix uploads/) so Agent 1 can actually read the image.
+    bucket = os.environ.get("UPLOAD_BUCKET") or os.environ["BUCKET_NAME"]
+    prefix = os.environ.get("UPLOAD_PREFIX", "evidence").strip("/")
+    key = f"{prefix}/{claim_id}/{uuid.uuid4()}.jpg"
     url = s3.generate_presigned_url(
         "put_object",
-        Params={"Bucket": os.environ["BUCKET_NAME"], "Key": key, "ContentType": "image/jpeg"},
+        Params={"Bucket": bucket, "Key": key, "ContentType": "image/jpeg"},
         ExpiresIn=300
     )
     return respond(200, {"upload_url": url, "s3_key": key})

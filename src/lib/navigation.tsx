@@ -31,6 +31,22 @@ export const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    path: "/admin",
+    label: "Admin Review",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+        <path
+          d="M8 1.5L2.5 4v4c0 3.4 2.5 6.3 5.5 7 3-.7 5.5-3.6 5.5-7V4L8 1.5z"
+          stroke="currentColor"
+          strokeWidth="1.3"
+          strokeLinejoin="round"
+        />
+        <circle cx="8" cy="7" r="1.8" stroke="currentColor" strokeWidth="1.2" />
+        <path d="M5.2 11.2c.6-1.1 1.6-1.7 2.8-1.7s2.2.6 2.8 1.7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
     path: "/analytics",
     label: "Analytics & Reports",
     matchPaths: ["/analytics", "/reports"],
@@ -61,6 +77,7 @@ export const NAV_ITEMS: NavItem[] = [
 
 export function getPageTitle(pathname: string): string {
   if (pathname === "/dashboard") return "Dashboard";
+  if (pathname === "/admin") return "Admin Review";
   if (pathname === "/analytics") return "Analytics";
   if (pathname === "/reports") return "Reports";
   if (pathname === "/settings") return "Settings";

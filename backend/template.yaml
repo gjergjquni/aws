@@ -12,6 +12,28 @@ Parameters:
   OrchestratorUrl:
     Type: String
     Default: ""
+  AegisApiUrl:
+    Type: String
+    Default: "https://xrx4q1jq0k.execute-api.us-east-1.amazonaws.com/prod"
+  AegisApiKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Agent API x-api-key. Pass at deploy time; never commit it.
+  UploadBucketName:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional override bucket for evidence uploads. Set this to the Agent
+      API evidence bucket (with UploadPrefix=uploads) so uploaded images can
+      actually be analyzed by Agent 1. Defaults to the stack's own bucket.
+  UploadPrefix:
+    Type: String
+    Default: "evidence"
+    Description: Key prefix for uploaded evidence objects.
+
+Conditions:
+  HasUploadBucket: !Not [!Equals [!Ref UploadBucketName, ""]]
 
 Globals:
   Function:
@@ -61,6 +83,10 @@ Resources:
           CLAIM_INTELLIGENCE_URL: !Ref ClaimIntelligenceUrl
           ORCHESTRATOR_URL: !Ref OrchestratorUrl
           MODEL_ID: amazon.nova-pro-v1:0
+          AEGIS_API_URL: !Ref AegisApiUrl
+          AEGIS_API_KEY: !Ref AegisApiKey
+          UPLOAD_BUCKET: !If [HasUploadBucket, !Ref UploadBucketName, !Ref EvidenceBucket]
+          UPLOAD_PREFIX: !Ref UploadPrefix
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref ClaimsTable
@@ -71,6 +97,14 @@ Resources:
               Action:
                 - bedrock:InvokeModel
               Resource: "*"
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+              Resource: !If
+                - HasUploadBucket
+                - !Sub "arn:aws:s3:::${UploadBucketName}/*"
+                - !Sub "arn:aws:s3:::${EvidenceBucket}/*"
       Events:
         SubmitClaim:
           Type: Api
@@ -102,6 +136,26 @@ Resources:
           Properties:
             Path: /claims/{claim_id}/decision
             Method: patch
+        AnalyzeSubmit:
+          Type: Api
+          Properties:
+            Path: /analyze
+            Method: post
+        AnalyzeStatus:
+          Type: Api
+          Properties:
+            Path: /analyze/{case_id}
+            Method: get
+        ReviewsPending:
+          Type: Api
+          Properties:
+            Path: /reviews/pending
+            Method: get
+        ReviewDecision:
+          Type: Api
+          Properties:
+            Path: /reviews/{case_id}/decision
+            Method: post
 
 Outputs:
   ApiUrl:

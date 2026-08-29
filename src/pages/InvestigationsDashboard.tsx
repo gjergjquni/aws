@@ -9,8 +9,89 @@ import RiskBadge, {
   StatusBadge,
 } from "@/components/RiskBadge";
 import { useInvestigations } from "@/hooks/useInvestigations";
-import type { InvestigationCategory, InvestigationStatus, RiskLevel } from "@/types";
+import { caseRegistry } from "@/services/caseRegistry";
+import type { InvestigationCategory, InvestigationStatus, RiskLevel, StoredCase } from "@/types";
 import { categoryLabel, formatCurrency, formatDate } from "@/utils/labels";
+
+function liveStatusBadge(c: StoredCase) {
+  const status = c.lastStatus ?? "processing";
+  if (status === "completed") {
+    const fraud = c.humanDecision === "FRAUD" || c.decision === "FRAUD";
+    return (
+      <span className={`inline-flex items-center gap-1.5 text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+        fraud
+          ? "bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-400"
+          : "bg-green-50 text-green-700 dark:bg-green-950/30 dark:text-green-400"
+      }`}>
+        <span className={`w-1.5 h-1.5 rounded-full ${fraud ? "bg-red-500" : "bg-green-500"}`} />
+        {c.humanDecision ?? c.decision ?? "Completed"}
+      </span>
+    );
+  }
+  if (status === "pending_human_review") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400">
+        <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+        Human Review
+      </span>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-400">
+        <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+        Failed
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 dark:bg-blue-950/30 dark:text-blue-400">
+      <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+      Processing
+    </span>
+  );
+}
+
+function LiveCasesSection() {
+  const navigate = useNavigate();
+  const liveCases = useMemo(() => caseRegistry.list(), []);
+
+  if (liveCases.length === 0) return null;
+
+  return (
+    <div className="bg-[var(--card)] border border-[var(--border)] rounded-[var(--radius-lg)] overflow-hidden mb-5">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
+        <div className="text-xs font-semibold text-[var(--muted-foreground)] uppercase tracking-wide">
+          Live Cases — Real Backend
+        </div>
+        <span className="text-xs text-[var(--muted-foreground)]">
+          {liveCases.length} {liveCases.length === 1 ? "case" : "cases"}
+        </span>
+      </div>
+      <div className="divide-y divide-[var(--border)]">
+        {liveCases.map((c) => (
+          <button
+            key={c.caseId}
+            type="button"
+            onClick={() => navigate(`/investigations/${c.caseId}`)}
+            className="w-full flex items-center gap-4 px-4 py-3 text-left hover:bg-[var(--muted)] transition-colors"
+          >
+            <span className="font-mono text-xs font-semibold text-[var(--primary)] flex-shrink-0">
+              {c.caseId}
+            </span>
+            <span className="text-xs text-[var(--muted-foreground)] truncate flex-1 min-w-0">
+              {c.message}
+            </span>
+            <span className="hidden sm:block text-[10px] text-[var(--muted-foreground)] whitespace-nowrap">
+              {formatDate(c.submittedAt, "short")}
+            </span>
+            {liveStatusBadge(c)}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function InvestigationsDashboard() {
   const navigate = useNavigate();
@@ -51,6 +132,8 @@ export default function InvestigationsDashboard() {
           New Investigation
         </Link>
       </div>
+
+      <LiveCasesSection />
 
       <div className="bg-[var(--card)] border border-[var(--border)] rounded-[var(--radius-lg)] overflow-hidden">
         <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-[var(--border)]">

@@ -1,6 +1,7 @@
 import { createBrowserRouter, Navigate } from "react-router";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import AppLayout from "@/layouts/AppLayout";
+import AdminReview from "@/pages/AdminReview";
 import Analytics from "@/pages/Analytics";
 import Dashboard from "@/pages/Dashboard";
 import InvestigationDetail from "@/pages/InvestigationDetail";
@@ -27,6 +28,7 @@ export const router = createBrowserRouter([
       { path: "investigations", Component: InvestigationsDashboard },
       { path: "investigations/new", Component: NewInvestigation },
       { path: "investigations/:id", Component: InvestigationDetail },
+      { path: "admin", Component: AdminReview },
       { path: "analytics", Component: Analytics },
       { path: "reports", Component: Reports },
       { path: "settings", Component: Settings },

@@ -4,9 +4,7 @@ import uuid
 import boto3
 from datetime import datetime, timezone
 from decimal import Decimal
-from concurrent.futures import ThreadPoolExecutor
-
-from remote import call_visual_agent, call_claim_agent, call_orchestrator_agent
+from remote import call_jeta_orchestrator
 
 dynamodb = boto3.resource("dynamodb")
 s3 = boto3.client("s3")
@@ -61,31 +59,15 @@ def handle_submit(event):
     body = json.loads(event.get("body", "{}"))
     claim_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
-
-    visual_url       = os.environ.get("VISUAL_EVIDENCE_URL", "")
-    claim_url        = os.environ.get("CLAIM_INTELLIGENCE_URL", "")
     orchestrator_url = os.environ.get("ORCHESTRATOR_URL", "")
 
-    # Agent 1 + Agent 3 paralel
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        vis_future = pool.submit(call_visual_agent, claim_id, body, visual_url)
-        clm_future = pool.submit(call_claim_agent,  claim_id, body, claim_url)
-        vis = vis_future.result()
-        clm = clm_future.result()
+    result = call_jeta_orchestrator(claim_id, body, orchestrator_url)
 
-    agents = {
-        "visual_evidence":    vis,
-        "claim_intelligence": clm,
-    }
+    decision   = result.get("decision", "HUMAN_REVIEW")
+    confidence = result.get("confidence", 0)
+    reason     = result.get("reason", result.get("explanation", ""))
+    case_id    = result.get("case_id", claim_id)
 
-    # Agent 6
-    orchestrator_result = call_orchestrator_agent(claim_id, agents, orchestrator_url)
-    decision    = orchestrator_result.get("decision", "HUMAN_REVIEW")
-    confidence  = orchestrator_result.get("confidence", 0)
-    explanation = orchestrator_result.get("reason", orchestrator_result.get("explanation", ""))
-    final_score = orchestrator_result.get("final_score", 0)
-
-    # Status bazuar ne vendimin e Agent 6
     if decision == "FRAUD":
         status = "rejected"
         requires_human = False
@@ -98,16 +80,15 @@ def handle_submit(event):
 
     item = {
         "claim_id":              claim_id,
+        "case_id":               case_id,
         "customer_id":           body.get("customer_id", "unknown"),
         "created_at":            now,
         "status":                status,
-        "final_score":           final_score,
-        "confidence":            confidence,
         "decision":              decision,
-        "explanation":           explanation,
-        "agents":                agents,
-        "orchestrator":          orchestrator_result,
+        "confidence":            confidence,
+        "explanation":           reason,
         "requires_human_review": requires_human,
+        "orchestrator_result":   result,
         "original_request":      body,
     }
 
@@ -117,10 +98,8 @@ def handle_submit(event):
 def handle_decision(event, claim_id):
     body = json.loads(event.get("body", "{}"))
     decision = body.get("decision", "")
-
     if decision not in ["approve", "reject", "request_info"]:
         return respond(400, {"error": "decision must be approve, reject, or request_info"})
-
     now = datetime.now(timezone.utc).isoformat()
     table.update_item(
         Key={"claim_id": claim_id},

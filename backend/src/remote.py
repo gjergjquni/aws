@@ -1,67 +1,67 @@
 import json
+import time
 import urllib.request
-from stubs import visual_evidence_stub, claim_intelligence_stub
-from adapters import adapt_visual, adapt_claim_intel
 
-def call_visual_agent(claim_id, payload, endpoint_url):
-    if not endpoint_url:
-        return {"source": "stub", **visual_evidence_stub(claim_id)}
-    
-    visual_payload = {
-        "claim_id": claim_id,
-        "s3_image_url": payload.get("s3_image_url", ""),
-        "product_category": payload.get("product_category", ""),
-        "customer_claimed_condition": payload.get("customer_text", "")
-    }
-    
-    data = json.dumps(visual_payload).encode()
-    req = urllib.request.Request(endpoint_url, data=data, headers={"Content-Type": "application/json"})
-    resp = urllib.request.urlopen(req, timeout=10)
-    raw = json.loads(resp.read())
-    return {"source": "live", **adapt_visual(raw)}
+JETA_BASE_URL = "https://xrx4q1jq0k.execute-api.us-east-1.amazonaws.com/prod"
+JETA_API_KEY  = "sAgc68whl72nnmRXSiHbb19YCT1WbrBz80uyS5Px"
 
-def call_claim_agent(claim_id, payload, endpoint_url):
-    if not endpoint_url:
-        return {"source": "stub", **claim_intelligence_stub(claim_id)}
-    
-    claim_payload = {
-        "claim_id": claim_id,
-        "customer_text": payload.get("customer_text", ""),
-        "product_category": payload.get("product_category", ""),
-        "order_value_usd": payload.get("order_value_usd", 0)
-    }
-    
-    data = json.dumps(claim_payload).encode()
-    req = urllib.request.Request(endpoint_url, data=data, headers={"Content-Type": "application/json"})
-    resp = urllib.request.urlopen(req, timeout=10)
-    raw = json.loads(resp.read())
-    return {"source": "live", **adapt_claim_intel(raw)}
+def _post(url, payload):
+    data = json.dumps(payload).encode()
+    req  = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json", "x-api-key": JETA_API_KEY}
+    )
+    resp = urllib.request.urlopen(req, timeout=30)
+    return json.loads(resp.read())
 
-def call_orchestrator_agent(claim_id, agents, endpoint_url):
+def _get(url):
+    req  = urllib.request.Request(
+        url,
+        headers={"Content-Type": "application/json", "x-api-key": JETA_API_KEY}
+    )
+    resp = urllib.request.urlopen(req, timeout=30)
+    return json.loads(resp.read())
+
+def call_jeta_orchestrator(claim_id, payload, endpoint_url):
     if not endpoint_url:
-        # Stub — llogarit score-in derisa Jeta të deployojë Agent 6
-        vis_score = agents.get("visual_evidence", {}).get("risk_score", 0)
-        clm_score = agents.get("claim_intelligence", {}).get("risk_score", 0)
-        final_score = round(vis_score * 0.6 + clm_score * 0.4, 1)
-        if final_score >= 70:
-            recommendation = "escalate"
-        elif final_score >= 40:
-            recommendation = "review"
-        else:
-            recommendation = "approve"
+        # Stub
         return {
-            "source": "stub",
-            "final_score": final_score,
-            "recommendation": recommendation,
-            "explanation": f"Risk score {final_score}/100 based on visual ({vis_score}) and claim ({clm_score}) analysis."
+            "source":               "stub",
+            "decision":             "HUMAN_REVIEW",
+            "confidence":           0.89,
+            "reason":               "Stub: score 89.2/100",
+            "case_id":              claim_id,
+            "requires_human_review": True,
+            "final_score":          89.2
         }
 
-    orchestrator_payload = {
-        "claim_id": claim_id,
-        "visual_evidence": agents.get("visual_evidence", {}),
-        "claim_intelligence": agents.get("claim_intelligence", {})
+    # Hapi 1 — Submit te Jeta
+    jeta_payload = {
+        "message": payload.get("customer_text", ""),
+        "s3_url":  f"s3://aws-s3-877791042657-us-east-1-an/{payload.get('s3_image_url', 'uploads/placeholder.jpg')}",
+        "case_id": claim_id,
+        "product_category": payload.get("product_category", "other"),
+        "order_value_usd":  payload.get("order_value_usd", 0)
     }
-    data = json.dumps(orchestrator_payload).encode()
-    req = urllib.request.Request(endpoint_url, data=data, headers={"Content-Type": "application/json"})
-    resp = urllib.request.urlopen(req, timeout=30)
-    return {"source": "live", **json.loads(resp.read())}
+
+    submit = _post(f"{JETA_BASE_URL}/analyze", jeta_payload)
+    case_id = submit.get("case_id", claim_id)
+
+    # Hapi 2 — Poll derisa të kryhet
+    for _ in range(25):  # max ~50 sekonda
+        time.sleep(2)
+        result = _get(f"{JETA_BASE_URL}/analyze/{case_id}")
+        status = result.get("status", "processing")
+        if status != "processing":
+            result["case_id"] = case_id
+            return result
+
+    # Timeout
+    return {
+        "source":               "timeout",
+        "decision":             "HUMAN_REVIEW",
+        "confidence":           0,
+        "reason":               "Orchestrator timeout — sent to human review",
+        "case_id":              case_id,
+        "requires_human_review": True
+    }

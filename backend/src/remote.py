@@ -1,9 +1,10 @@
 import json
+import os
 import time
 import urllib.request
 
-JETA_BASE_URL = "https://xrx4q1jq0k.execute-api.us-east-1.amazonaws.com/prod"
-JETA_API_KEY  = "sAgc68whl72nnmRXSiHbb19YCT1WbrBz80uyS5Px"
+JETA_BASE_URL = os.environ.get("JETA_BASE_URL", "")
+JETA_API_KEY = os.environ.get("JETA_API_KEY", "")
 
 def _post(url, payload):
     data = json.dumps(payload).encode()
@@ -38,7 +39,7 @@ def call_jeta_orchestrator(claim_id, payload, endpoint_url):
     # Hapi 1 — Submit te Jeta
     jeta_payload = {
         "message": payload.get("customer_text", ""),
-        "s3_url":  f"s3://aws-s3-877791042657-us-east-1-an/{payload.get('s3_image_url', 'uploads/placeholder.jpg')}",
+        "s3_url":  f"{os.environ.get('JETA_S3_BUCKET', 's3://aws-s3-877791042657-us-east-1-an')}/{payload.get('s3_image_url', 'uploads/placeholder.jpg')}",
         "case_id": claim_id,
         "product_category": payload.get("product_category", "other"),
         "order_value_usd":  payload.get("order_value_usd", 0)

@@ -12,6 +12,12 @@ Parameters:
   OrchestratorUrl:
     Type: String
     Default: ""
+  JetaApiKey:
+    Type: String
+    Default: ""
+  JetaS3Bucket:
+    Type: String
+    Default: "s3://aws-s3-877791042657-us-east-1-an"
 
 Globals:
   Function:
@@ -60,6 +66,9 @@ Resources:
           VISUAL_EVIDENCE_URL: !Ref VisualEvidenceUrl
           CLAIM_INTELLIGENCE_URL: !Ref ClaimIntelligenceUrl
           ORCHESTRATOR_URL: !Ref OrchestratorUrl
+          JETA_BASE_URL: !Ref OrchestratorUrl
+          JETA_API_KEY: !Ref JetaApiKey
+          JETA_S3_BUCKET: !Ref JetaS3Bucket
           MODEL_ID: amazon.nova-pro-v1:0
       Policies:
         - DynamoDBCrudPolicy:

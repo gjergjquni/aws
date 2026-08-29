@@ -6,9 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 
-from scoring import aggregate
-from remote import call_visual_agent, call_claim_agent
-from explain import generate_explanation
+from remote import call_visual_agent, call_claim_agent, call_orchestrator_agent
 
 dynamodb = boto3.resource("dynamodb")
 s3 = boto3.client("s3")
@@ -20,14 +18,30 @@ def decimal_default(obj):
     raise TypeError
 
 def respond(status, body):
-    return {"statusCode": status, "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}, "body": json.dumps(body, default=decimal_default)}
+    return {
+        "statusCode": status,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+            "Access-Control-Allow-Methods": "GET,POST,PATCH,OPTIONS",
+        },
+        "body": json.dumps(body, default=decimal_default)
+    }
 
 def lambda_handler(event, context):
     path = event.get("path", "")
     method = event.get("httpMethod", "")
     try:
-        if path == "/claims" and method == "POST":
+        if method == "OPTIONS":
+            return respond(200, {})
+        elif path == "/claims" and method == "POST":
             return handle_submit(event)
+        elif path.startswith("/claims/") and path.endswith("/decision") and method == "PATCH":
+            claim_id = path.split("/")[2]
+            return handle_decision(event, claim_id)
+        elif path == "/claims/pending" and method == "GET":
+            return handle_list_pending()
         elif path.startswith("/claims/") and method == "GET":
             claim_id = path.split("/")[-1]
             return handle_get(claim_id)
@@ -47,39 +61,85 @@ def handle_submit(event):
     body = json.loads(event.get("body", "{}"))
     claim_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    visual_url = os.environ.get("VISUAL_EVIDENCE_URL", "")
-    claim_url = os.environ.get("CLAIM_INTELLIGENCE_URL", "")
-    model_id = os.environ.get("MODEL_ID", "amazon.nova-pro-v1:0")
 
+    visual_url       = os.environ.get("VISUAL_EVIDENCE_URL", "")
+    claim_url        = os.environ.get("CLAIM_INTELLIGENCE_URL", "")
+    orchestrator_url = os.environ.get("ORCHESTRATOR_URL", "")
+
+    # Agent 1 + Agent 3 paralel
     with ThreadPoolExecutor(max_workers=2) as pool:
         vis_future = pool.submit(call_visual_agent, claim_id, body, visual_url)
-        clm_future = pool.submit(call_claim_agent, claim_id, body, claim_url)
+        clm_future = pool.submit(call_claim_agent,  claim_id, body, claim_url)
         vis = vis_future.result()
         clm = clm_future.result()
 
-    agents = {"visual_evidence": vis, "claim_intelligence": clm}
-    scores = {"visual_evidence": vis["risk_score"], "claim_intelligence": clm["risk_score"]}
-    result = aggregate(scores)
+    agents = {
+        "visual_evidence":    vis,
+        "claim_intelligence": clm,
+    }
 
-    try:
-        explanation = generate_explanation(result["final_score"], result["recommendation"], agents, model_id)
-    except Exception as e:
-        explanation = f"Explanation unavailable: {e}"
+    # Agent 6
+    orchestrator_result = call_orchestrator_agent(claim_id, agents, orchestrator_url)
+    decision    = orchestrator_result.get("decision", "HUMAN_REVIEW")
+    confidence  = orchestrator_result.get("confidence", 0)
+    explanation = orchestrator_result.get("reason", orchestrator_result.get("explanation", ""))
+    final_score = orchestrator_result.get("final_score", 0)
+
+    # Status bazuar ne vendimin e Agent 6
+    if decision == "FRAUD":
+        status = "rejected"
+        requires_human = False
+    elif decision == "NOT_FRAUD":
+        status = "approved"
+        requires_human = False
+    else:
+        status = "pending"
+        requires_human = True
 
     item = {
-        "claim_id": claim_id,
-        "customer_id": body.get("customer_id", "unknown"),
-        "created_at": now,
-        "status": result["recommendation"],
-        "final_score": result["final_score"],
-        "agents": agents,
-        "scores": scores,
-        "weights": result["weights_used"],
-        "explanation": explanation,
-        "original_request": body
+        "claim_id":              claim_id,
+        "customer_id":           body.get("customer_id", "unknown"),
+        "created_at":            now,
+        "status":                status,
+        "final_score":           final_score,
+        "confidence":            confidence,
+        "decision":              decision,
+        "explanation":           explanation,
+        "agents":                agents,
+        "orchestrator":          orchestrator_result,
+        "requires_human_review": requires_human,
+        "original_request":      body,
     }
+
     table.put_item(Item=json.loads(json.dumps(item), parse_float=Decimal))
     return respond(200, item)
+
+def handle_decision(event, claim_id):
+    body = json.loads(event.get("body", "{}"))
+    decision = body.get("decision", "")
+
+    if decision not in ["approve", "reject", "request_info"]:
+        return respond(400, {"error": "decision must be approve, reject, or request_info"})
+
+    now = datetime.now(timezone.utc).isoformat()
+    table.update_item(
+        Key={"claim_id": claim_id},
+        UpdateExpression="SET #s = :s, decided_at = :d, decided_by = :u, requires_human_review = :f",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={
+            ":s": decision,
+            ":d": now,
+            ":u": body.get("investigator_id", "unknown"),
+            ":f": False
+        }
+    )
+    return respond(200, {"claim_id": claim_id, "status": decision, "decided_at": now})
+
+def handle_list_pending():
+    resp = table.scan(
+        FilterExpression=boto3.dynamodb.conditions.Attr("status").eq("pending")
+    )
+    return respond(200, {"claims": resp.get("Items", [])})
 
 def handle_get(claim_id):
     resp = table.get_item(Key={"claim_id": claim_id})
@@ -89,12 +149,19 @@ def handle_get(claim_id):
     return respond(200, item)
 
 def handle_list_by_customer(customer_id):
-    resp = table.query(IndexName="customer-index", KeyConditionExpression=boto3.dynamodb.conditions.Key("customer_id").eq(customer_id))
+    resp = table.query(
+        IndexName="customer-index",
+        KeyConditionExpression=boto3.dynamodb.conditions.Key("customer_id").eq(customer_id)
+    )
     return respond(200, {"claims": resp["Items"]})
 
 def handle_upload(event):
     body = json.loads(event.get("body", "{}"))
     claim_id = body.get("claim_id", str(uuid.uuid4()))
     key = f"evidence/{claim_id}/{uuid.uuid4()}.jpg"
-    url = s3.generate_presigned_url("put_object", Params={"Bucket": os.environ["BUCKET_NAME"], "Key": key, "ContentType": "image/jpeg"}, ExpiresIn=300)
+    url = s3.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": os.environ["BUCKET_NAME"], "Key": key, "ContentType": "image/jpeg"},
+        ExpiresIn=300
+    )
     return respond(200, {"upload_url": url, "s3_key": key})

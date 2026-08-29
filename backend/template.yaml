@@ -9,10 +9,13 @@ Parameters:
   ClaimIntelligenceUrl:
     Type: String
     Default: ""
+  OrchestratorUrl:
+    Type: String
+    Default: ""
 
 Globals:
   Function:
-    Timeout: 30
+    Timeout: 60
     Runtime: python3.13
     MemorySize: 512
 
@@ -56,6 +59,7 @@ Resources:
           BUCKET_NAME: !Ref EvidenceBucket
           VISUAL_EVIDENCE_URL: !Ref VisualEvidenceUrl
           CLAIM_INTELLIGENCE_URL: !Ref ClaimIntelligenceUrl
+          ORCHESTRATOR_URL: !Ref OrchestratorUrl
           MODEL_ID: amazon.nova-pro-v1:0
       Policies:
         - DynamoDBCrudPolicy:
@@ -88,6 +92,16 @@ Resources:
           Properties:
             Path: /uploads
             Method: post
+        ListPending:
+          Type: Api
+          Properties:
+            Path: /claims/pending
+            Method: get
+        ClaimDecision:
+          Type: Api
+          Properties:
+            Path: /claims/{claim_id}/decision
+            Method: patch
 
 Outputs:
   ApiUrl:

@@ -35,16 +35,22 @@ export default defineConfig(({ mode }) => {
       changeOrigin: true,
       rewrite: (p) => p.replace(/^\/api\/agent/, ""),
       headers: agentApiKey ? { "x-api-key": agentApiKey } : undefined,
+      timeout: 60_000,
+      proxyTimeout: 60_000,
     },
     "/api/backend": {
       target: backendApiUrl,
       changeOrigin: true,
       rewrite: (p) => p.replace(/^\/api\/backend/, ""),
+      timeout: 60_000,
+      proxyTimeout: 60_000,
     },
     "/api/evidence": {
       target: evidenceBucketUrl,
       changeOrigin: true,
       rewrite: (p) => p.replace(/^\/api\/evidence/, ""),
+      timeout: 60_000,
+      proxyTimeout: 60_000,
     },
   };
 

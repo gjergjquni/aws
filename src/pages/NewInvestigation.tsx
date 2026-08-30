@@ -83,11 +83,11 @@ function SubmittingState({
   ]);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const startedRef = useRef(false);
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
+    const abort = new AbortController();
     let cancelled = false;
 
     const setStepState = (key: string, state: StepState) => {
@@ -109,26 +109,32 @@ function SubmittingState({
         const claimId = crypto.randomUUID();
 
         setStepState("upload-url", "active");
-        const ticket = await claimsApi.requestUploadUrl({
-          claimId,
-          file: input.imageFile,
-        });
+        const ticket = await claimsApi.requestUploadUrl(
+          { claimId, file: input.imageFile },
+          abort.signal,
+        );
+        if (cancelled) return;
         setStepState("upload-url", "done");
 
         setStepState("s3-upload", "active");
-        await claimsApi.uploadEvidenceImage(ticket, input.imageFile);
+        await claimsApi.uploadEvidenceImage(ticket, input.imageFile, abort.signal);
+        if (cancelled) return;
         const uploadCompletedAt = new Date().toISOString();
         setStepState("s3-upload", "done");
 
         setStepState("analyze", "active");
-        const submitted = await claimsApi.createCase({
-          claimId: ticket.claim_id,
-          message: input.explanation,
-          s3Url: ticket.s3_url,
-          s3Key: ticket.s3_key,
-          productCategory: input.category,
-          orderValueUsd: input.orderValue,
-        });
+        const submitted = await claimsApi.createCase(
+          {
+            claimId: ticket.claim_id,
+            message: input.explanation,
+            s3Url: ticket.s3_url,
+            s3Key: ticket.s3_key,
+            productCategory: input.category,
+            orderValueUsd: input.orderValue,
+          },
+          abort.signal,
+        );
+        if (cancelled) return;
         setStepState("analyze", "done");
 
         caseRegistry.save({
@@ -143,9 +149,9 @@ function SubmittingState({
           lastStatus: submitted.status,
         });
 
-        if (!cancelled) onComplete(submitted.case_id);
+        if (!cancelled) onCompleteRef.current(submitted.case_id);
       } catch (err) {
-        if (cancelled) return;
+        if (cancelled || abort.signal.aborted) return;
         setSteps((prev) =>
           prev.map((s) => (s.state === "active" ? { ...s, state: "error" } : s)),
         );
@@ -156,8 +162,9 @@ function SubmittingState({
     run();
     return () => {
       cancelled = true;
+      abort.abort();
     };
-  }, [input, onComplete, attempt]);
+  }, [input, attempt]);
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] px-6">
@@ -213,7 +220,6 @@ function SubmittingState({
                 onClick={() => {
                   setError(null);
                   setSteps((prev) => prev.map((s) => ({ ...s, state: "waiting" })));
-                  startedRef.current = false;
                   setAttempt((a) => a + 1);
                 }}
                 className="px-3 py-1.5 text-xs font-semibold rounded-[var(--radius)] bg-[var(--primary)] text-white hover:opacity-90"
@@ -232,9 +238,18 @@ function SubmittingState({
         )}
 
         {!error && (
-          <p className="text-center text-xs text-[var(--muted-foreground)] mt-8">
-            The case ID is assigned by the backend once the claim is accepted.
-          </p>
+          <div className="mt-8 text-center">
+            <p className="text-xs text-[var(--muted-foreground)] mb-3">
+              The case ID is assigned by the backend once the claim is accepted.
+            </p>
+            <button
+              type="button"
+              onClick={onBack}
+              className="px-3 py-1.5 text-xs font-medium rounded-[var(--radius)] border border-[var(--border)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
+            >
+              Cancel
+            </button>
+          </div>
         )}
       </div>
     </div>

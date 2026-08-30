@@ -555,12 +555,15 @@ function AuditTab({ inv }: { inv: Investigation }) {
 export default function InvestigationDetail() {
   const { id } = useParams();
 
-  // Cases created through the real backend (POST /analyze) have IDs like
-  // "CASE-…" and/or are tracked in the local case registry. They render the
-  // live, backend-driven view; legacy seed records keep the original page.
+  // Cases created through the real backend have IDs like "CASE-…", a UUID
+  // from Aegis, and/or an entry in the local case registry.
   const isLiveCase =
     Boolean(id) &&
-    (Boolean(caseRegistry.get(id)) || /^case-/i.test(id ?? ""));
+    (Boolean(caseRegistry.get(id)) ||
+      /^case-/i.test(id ?? "") ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        id ?? "",
+      ));
 
   if (isLiveCase && id) {
     return <LiveCaseDetail key={id} caseId={id} />;

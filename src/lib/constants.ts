@@ -11,4 +11,13 @@ export const APP_NAME = "Aegis Swarm";
 /** Poll interval for GET /analyze/{case_id} while a case is processing. */
 export const CASE_POLL_INTERVAL_MS = 2000;
 
+/** Abort JSON API calls if the backend does not answer in time. */
+export const API_TIMEOUT_MS = 25_000;
+
+/** Evidence PUT can be slower than JSON calls. */
+export const UPLOAD_TIMEOUT_MS = 60_000;
+
+/** POST /claims waits on S3 verify + Aegis accept. */
+export const CLAIMS_TIMEOUT_MS = 55_000;
+
 export const MAX_RECENT_SEARCHES = 5;

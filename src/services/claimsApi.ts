@@ -1,3 +1,8 @@
+import {
+  API_TIMEOUT_MS,
+  CLAIMS_TIMEOUT_MS,
+  UPLOAD_TIMEOUT_MS,
+} from "@/lib/constants";
 import type {
   AnalyzeSubmitResponse,
   CaseStatusResponse,
@@ -39,12 +44,56 @@ function extractErrorMessage(payload: unknown): string | null {
   return typeof message === "string" ? message : null;
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
+}
+
+function mergeAbortSignals(
+  timeoutMs: number,
+  userSignal?: AbortSignal,
+): { signal: AbortSignal; cancelTimeout: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const onUserAbort = () => controller.abort();
+  if (userSignal) {
+    if (userSignal.aborted) controller.abort();
+    else userSignal.addEventListener("abort", onUserAbort, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    cancelTimeout: () => {
+      clearTimeout(timer);
+      userSignal?.removeEventListener("abort", onUserAbort);
+    },
+  };
+}
+
+async function request<T>(
+  url: string,
+  init?: RequestInit,
+  timeoutMs: number = API_TIMEOUT_MS,
+): Promise<T> {
+  const { signal, cancelTimeout } = mergeAbortSignals(
+    timeoutMs,
+    init?.signal ?? undefined,
+  );
   let response: Response;
   try {
-    response = await fetch(url, init);
-  } catch {
+    response = await fetch(url, { ...init, signal });
+  } catch (err) {
+    if (isAbortError(err)) {
+      throw new ApiError(
+        init?.signal?.aborted
+          ? "Submission cancelled."
+          : "Request timed out. The backend did not respond.",
+        0,
+      );
+    }
     throw new ApiError("Network error — could not reach the backend.", 0);
+  } finally {
+    cancelTimeout();
   }
 
   let payload: unknown = null;
@@ -79,19 +128,25 @@ export const claimsApi = {
    * Ask the SAM backend for a presigned S3 upload URL.
    * The backend generates the canonical object key and s3_url once.
    */
-  async requestUploadUrl(input: {
-    claimId: string;
-    file: File;
-  }): Promise<UploadTicket> {
+  async requestUploadUrl(
+    input: {
+      claimId: string;
+      file: File;
+    },
+    signal?: AbortSignal,
+  ): Promise<UploadTicket> {
     const validated = validateEvidenceFile(input.file);
     return request<UploadTicket>(
       `${BACKEND_BASE}/uploads`,
-      jsonInit("POST", {
-        claim_id: input.claimId,
-        content_type: validated.contentType,
-        filename: input.file.name,
-        content_length: input.file.size,
-      }),
+      {
+        ...jsonInit("POST", {
+          claim_id: input.claimId,
+          content_type: validated.contentType,
+          filename: input.file.name,
+          content_length: input.file.size,
+        }),
+        signal,
+      },
     );
   },
 
@@ -101,10 +156,18 @@ export const claimsApi = {
    * do not block the PUT. The PUT Content-Type must match the type
    * that was signed (ticket.content_type).
    */
-  async uploadEvidenceImage(ticket: UploadTicket, file: File): Promise<void> {
+  async uploadEvidenceImage(
+    ticket: UploadTicket,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<void> {
     validateEvidenceFile(file);
     const url = new URL(ticket.upload_url);
     const proxiedUrl = `${EVIDENCE_PROXY_BASE}${url.pathname}${url.search}`;
+    const { signal: merged, cancelTimeout } = mergeAbortSignals(
+      UPLOAD_TIMEOUT_MS,
+      signal,
+    );
 
     let response: Response;
     try {
@@ -112,9 +175,20 @@ export const claimsApi = {
         method: "PUT",
         headers: { "Content-Type": ticket.content_type },
         body: file,
+        signal: merged,
       });
-    } catch {
+    } catch (err) {
+      if (isAbortError(err)) {
+        throw new ApiError(
+          signal?.aborted
+            ? "Submission cancelled."
+            : "Image upload timed out.",
+          0,
+        );
+      }
       throw new ApiError("Network error — image upload failed.", 0);
+    } finally {
+      cancelTimeout();
     }
 
     if (!response.ok) {
@@ -130,7 +204,10 @@ export const claimsApi = {
    * and POSTs the exact ticket s3_url to Aegis. The frontend never
    * invents or rewrites the S3 location.
    */
-  async createCase(input: CreateCaseInput): Promise<AnalyzeSubmitResponse> {
+  async createCase(
+    input: CreateCaseInput,
+    signal?: AbortSignal,
+  ): Promise<AnalyzeSubmitResponse> {
     if (!input.s3Url) {
       throw new ApiError("An evidence image is required.", 400);
     }
@@ -148,7 +225,8 @@ export const claimsApi = {
 
     return request<AnalyzeSubmitResponse>(
       `${BACKEND_BASE}/claims`,
-      jsonInit("POST", body),
+      { ...jsonInit("POST", body), signal },
+      CLAIMS_TIMEOUT_MS,
     );
   },
 

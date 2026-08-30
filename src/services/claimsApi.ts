@@ -1,5 +1,6 @@
 import {
   API_TIMEOUT_MS,
+  BACKEND_BASE,
   CLAIMS_TIMEOUT_MS,
   UPLOAD_TIMEOUT_MS,
 } from "@/lib/constants";
@@ -15,10 +16,7 @@ import type {
 } from "@/types";
 import { validateEvidenceFile } from "@/utils/evidence";
 
-// All live case traffic goes through the SAM backend proxy
-// (/api/backend). The backend attaches the Agent API key server-side.
-// /api/evidence is only used for the presigned S3 PUT.
-const BACKEND_BASE = "/api/backend";
+// Evidence PUTs go through /api/evidence so browser CORS does not block S3.
 const EVIDENCE_PROXY_BASE = "/api/evidence";
 
 export class ApiError extends Error {

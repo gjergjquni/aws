@@ -8,6 +8,18 @@ export const STORAGE_KEYS = {
 
 export const APP_NAME = "Aegis Swarm";
 
+/** SAM API Gateway. Production builds call this directly so every Vercel URL works. */
+export const AWS_BACKEND_URL =
+  "https://q7phgdg1m5.execute-api.us-east-1.amazonaws.com/Prod";
+
+/**
+ * Local Vite proxies /api/backend. Hosted builds (any *.vercel.app, including
+ * preview URLs) talk to API Gateway — Vite catch-all API routes 404 on Vercel.
+ */
+export const BACKEND_BASE = import.meta.env.DEV
+  ? "/api/backend"
+  : AWS_BACKEND_URL;
+
 /** Poll interval for GET /analyze/{case_id} while a case is processing. */
 export const CASE_POLL_INTERVAL_MS = 2000;
 

@@ -46,9 +46,126 @@ def upload_prefix() -> str:
     return os.environ.get("UPLOAD_PREFIX", "uploads")
 
 
+def request_path(event):
+    path = event.get("path") or event.get("rawPath") or ""
+    stage = (event.get("requestContext") or {}).get("stage")
+    if stage and path.startswith(f"/{stage}/"):
+        path = path[len(stage) + 1 :]
+    elif path.startswith("/Prod/"):
+        path = path[5:]
+    if path and not path.startswith("/"):
+        path = "/" + path
+    return path
+
+
+def request_method(event):
+    return (
+        event.get("httpMethod")
+        or ((event.get("requestContext") or {}).get("http") or {}).get("method")
+        or ""
+    )
+
+
+def lookup_claim(case_id):
+    """Find a claim by DynamoDB key (claim_id) or by stored Aegis case_id."""
+    if not case_id:
+        return None
+    item = table.get_item(Key={"claim_id": case_id}).get("Item")
+    if item:
+        return item
+    scanned = table.scan(
+        FilterExpression=boto3.dynamodb.conditions.Attr("case_id").eq(case_id)
+    )
+    items = scanned.get("Items") or []
+    return items[0] if items else None
+
+
+def claim_to_status(item):
+    """Shape a DynamoDB claim as GET /analyze/{id} for the frontend."""
+    orch = item.get("orchestrator_result") or {}
+    if not isinstance(orch, dict):
+        orch = {}
+    orch_status = orch.get("status")
+    stored = item.get("status")
+    decision = item.get("decision") or orch.get("decision")
+
+    if orch_status in ("processing", "completed", "pending_human_review", "failed"):
+        status = orch_status
+    elif stored == "pending" or item.get("requires_human_review"):
+        status = "pending_human_review"
+    elif stored in ("approved", "rejected") or decision in ("FRAUD", "NOT_FRAUD"):
+        status = "completed"
+    else:
+        status = "processing"
+
+    case_id = item.get("case_id") or item.get("claim_id")
+    return {
+        "status": status,
+        "case_id": case_id,
+        "claim_id": item.get("claim_id"),
+        "decision": decision,
+        "confidence": item.get("confidence") if item.get("confidence") is not None else orch.get("confidence"),
+        "reason": item.get("explanation") or orch.get("reason") or orch.get("message") or "",
+        "requires_human_review": bool(item.get("requires_human_review")),
+        "human_decision": item.get("human_decision") or orch.get("human_decision"),
+        "message": orch.get("message") or item.get("explanation") or "Claim loaded from registry",
+        "poll_url": f"/analyze/{case_id}",
+    }
+
+
+def claim_to_review(item):
+    orch = item.get("orchestrator_result") or {}
+    if not isinstance(orch, dict):
+        orch = {}
+    return {
+        "case_id": item.get("case_id") or item.get("claim_id"),
+        "status": item.get("status") or orch.get("status"),
+        "message": item.get("explanation") or orch.get("message") or orch.get("reason"),
+        "s3_url": item.get("s3_url"),
+        "confidence": item.get("confidence") if item.get("confidence") is not None else orch.get("confidence"),
+        "reason": item.get("explanation") or orch.get("reason"),
+        "created_at": item.get("created_at"),
+        "human_decision": item.get("human_decision"),
+        "agent_6_result": orch or None,
+    }
+
+
+def handle_analyze_get(case_id):
+    status, body = proxy_request("GET", f"/analyze/{case_id}")
+    if status == 200:
+        return respond(status, body)
+    item = lookup_claim(case_id)
+    if item:
+        log_event(
+            "ANALYZE_FALLBACK_REGISTRY",
+            case_id=case_id,
+            upstream_status=status,
+            claim_id=item.get("claim_id"),
+        )
+        return respond(200, claim_to_status(item))
+    return respond(status, body if isinstance(body, dict) else {"error": "not found"})
+
+
+def handle_reviews_pending():
+    status, body = proxy_request("GET", "/reviews/pending")
+    cases = body.get("cases") if isinstance(body, dict) else None
+    if status == 200 and cases:
+        return respond(status, body)
+    resp = table.scan(
+        FilterExpression=boto3.dynamodb.conditions.Attr("status").eq("pending")
+    )
+    mapped = [claim_to_review(item) for item in resp.get("Items", [])]
+    if mapped:
+        return respond(200, {"status": "ok", "count": len(mapped), "cases": mapped})
+    if status == 200:
+        return respond(status, body if isinstance(body, dict) else {"status": "ok", "count": 0, "cases": []})
+    return respond(status, body if isinstance(body, dict) else {"error": "not found"})
+
+
 def lambda_handler(event, context):
-    path = event.get("path", "")
-    method = event.get("httpMethod", "")
+    path = request_path(event)
+    method = request_method(event)
+    params = event.get("pathParameters") or {}
     try:
         if method == "OPTIONS":
             return respond(200, {})
@@ -60,30 +177,30 @@ def lambda_handler(event, context):
         elif path == "/claims/pending" and method == "GET":
             return handle_list_pending()
         elif path.startswith("/claims/") and method == "GET":
-            claim_id = path.split("/")[-1]
+            claim_id = params.get("claim_id") or path.split("/")[-1]
             return handle_get(claim_id)
         elif path == "/claims" and method == "GET":
-            params = event.get("queryStringParameters") or {}
-            if "customer_id" in params:
-                return handle_list_by_customer(params["customer_id"])
+            query = event.get("queryStringParameters") or {}
+            if "customer_id" in query:
+                return handle_list_by_customer(query["customer_id"])
             return respond(400, {"error": "customer_id query param required"})
         elif path == "/uploads" and method == "POST":
             return handle_upload(event)
-        # Proxy endpoints: forward to the Agent API with the x-api-key
-        # attached server-side so the browser never holds the key.
         elif path == "/analyze" and method == "POST":
             status, body = proxy_request("POST", "/analyze", json.loads(event.get("body") or "{}"))
             return respond(status, body)
         elif path.startswith("/analyze/") and method == "GET":
-            case_id = path.split("/")[-1]
-            status, body = proxy_request("GET", f"/analyze/{case_id}")
-            return respond(status, body)
+            case_id = params.get("case_id") or path.split("/")[-1]
+            return handle_analyze_get(case_id)
         elif path == "/reviews/pending" and method == "GET":
-            status, body = proxy_request("GET", "/reviews/pending")
-            return respond(status, body)
+            return handle_reviews_pending()
         elif path.startswith("/reviews/") and path.endswith("/decision") and method == "POST":
-            case_id = path.split("/")[2]
-            status, body = proxy_request("POST", f"/reviews/{case_id}/decision", json.loads(event.get("body") or "{}"))
+            case_id = params.get("case_id") or path.split("/")[2]
+            status, body = proxy_request(
+                "POST",
+                f"/reviews/{case_id}/decision",
+                json.loads(event.get("body") or "{}"),
+            )
             return respond(status, body)
         else:
             return respond(404, {"error": "not found"})
@@ -125,7 +242,7 @@ def handle_submit(event):
         return respond(exc.code, upstream)
     except RuntimeError as exc:
         return respond(503, {"error": {"code": "aegis_unconfigured", "message": str(exc)}})
-    case_id = submit.get("case_id", claim_id)
+    case_id = submit.get("case_id") or submit.get("id") or submit.get("caseId") or claim_id
     decision = submit.get("decision", "HUMAN_REVIEW")
     confidence = submit.get("confidence", 0)
     reason = submit.get("reason", submit.get("explanation", submit.get("message", "")))
@@ -203,8 +320,7 @@ def handle_list_pending():
 
 
 def handle_get(claim_id):
-    resp = table.get_item(Key={"claim_id": claim_id})
-    item = resp.get("Item")
+    item = lookup_claim(claim_id)
     if not item:
         return respond(404, {"error": "claim not found"})
     return respond(200, item)

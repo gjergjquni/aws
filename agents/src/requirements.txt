@@ -1,0 +1,10 @@
+# Installed into every function by `sam build`. All functions share CodeUri
+# src/ so the shared/ package is bundled once per function.
+#
+# boto3 is present in the Lambda runtime but pinned here so Converse API support
+# and behaviour do not drift with AWS's runtime updates.
+boto3>=1.35.0,<2.0.0
+Pillow>=11.0.0,<12.0.0
+requests>=2.32.0,<3.0.0
+opensearch-py>=2.6.0,<3.0.0
+requests-aws4auth>=1.2.0,<2.0.0

@@ -1,0 +1,27 @@
+# Secrets — never commit real credentials. Values live in Secrets Manager.
+.env
+.env.*
+!.env.example
+*.pem
+credentials
+
+# SAM / CloudFormation
+.aws-sam/
+samconfig.toml
+packaged.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local scratch
+events/
+out.json
+*.log
+.DS_Store

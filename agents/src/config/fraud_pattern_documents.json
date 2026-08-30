@@ -1,0 +1,227 @@
+[
+  {
+    "pattern_id": "empty_box_scam",
+    "pattern_type": "fulfillment_mismatch",
+    "description": "Customer claims the package arrived empty while tracking weight matched the shipment and packaging shows no tampering.",
+    "example_claim": "The box was completely empty when it arrived. There was nothing inside except packaging. I need a full refund for the missing item.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "wrong_item_sent",
+    "pattern_type": "substitution",
+    "description": "Customer claims they received a cheap substitute such as a brick or unrelated item while keeping the ordered product.",
+    "example_claim": "You sent the wrong item. I ordered the laptop and received a brick wrapped in paper. This is not what I ordered.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "damaged_after_delivery",
+    "pattern_type": "post_delivery_damage",
+    "description": "Damage claimed as transit damage after a period of use; wear is inconsistent with shipping impact.",
+    "example_claim": "It arrived damaged. The screen is cracked. I opened it today even though delivery was last week and I need a replacement immediately.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "ai_photo_fraud",
+    "pattern_type": "synthetic_evidence",
+    "description": "Submitted photos appear generated or locally edited to add damage that is not physically present.",
+    "example_claim": "See the picture attached, the damage is clearly shown. Photo proof of the crack as shown in the image.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "serial_returner",
+    "pattern_type": "wardrobing",
+    "description": "Repeated purchase-and-return behaviour consistent with using products and sending them back.",
+    "example_claim": "It didn't work out. I changed my mind. Not as expected. Please process the return and refund.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "high_value_target",
+    "pattern_type": "high_value",
+    "description": "High-value electronics or luxury item with multiple combined pressure and evidence anomalies.",
+    "example_claim": "This premium flagship device is defective. It is an expensive luxury item and I demand an immediate refund on this high-end purchase.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "account_takeover",
+    "pattern_type": "account_abuse",
+    "description": "Refund requested after account contact details or shipping destination recently changed.",
+    "example_claim": "Please update my account and send the refund to a different card. Ship any replacement to my other address and new email.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "gift_card_fraud",
+    "pattern_type": "payout_manipulation",
+    "description": "Insistence on gift-card or store-credit refund rather than original payment method.",
+    "example_claim": "Refund to gift card please. I want store credit instead of reversing the original payment. Credit my account with a voucher.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "partial_return",
+    "pattern_type": "missing_contents",
+    "description": "Box returned with accessories or the main unit missing.",
+    "example_claim": "I returned everything. All contents were included. This is a complete return, I sent it all back.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "switch_fraud",
+    "pattern_type": "product_switch",
+    "description": "A different, older, or counterfeit unit is returned in place of the purchased item.",
+    "example_claim": "This is the same product, the identical item, the exact one I received, the original unit.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "warranty_scam",
+    "pattern_type": "warranty_abuse",
+    "description": "Defect claimed at the warranty boundary or for a unit older than the purchase.",
+    "example_claim": "It is still under warranty. It just stopped working. This is a manufacturer defect and it just broke.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "missing_parts",
+    "pattern_type": "missing_accessories",
+    "description": "Factory-sealed product claimed to be missing charger, cable, or parts.",
+    "example_claim": "There were missing parts. No charger was in the box. The cable was not included. The package was incomplete.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "fake_tracking",
+    "pattern_type": "false_return_shipment",
+    "description": "Customer asserts a return was shipped using a tracking number that does not correspond to a real parcel.",
+    "example_claim": "I already shipped it back. Here is the tracking number. It is in transit, check the tracking, I sent it back.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "weight_mismatch",
+    "pattern_type": "weight_anomaly",
+    "description": "Returned parcel weight is inconsistent with the original product weight.",
+    "example_claim": "I sent everything back. Full return, complete package, nothing missing.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "pressure_tactics",
+    "pattern_type": "urgency_pressure",
+    "description": "Legal threats, chargeback threats, or same-day deadlines used to skip verification.",
+    "example_claim": "I need this refund today immediately. My lawyer will be in touch. I will file a chargeback and a complaint ASAP.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "emotional_manipulation",
+    "pattern_type": "sympathy_narrative",
+    "description": "Elaborate sympathy details unrelated to the product defect used to bypass checks.",
+    "example_claim": "My sick child is in hospital and this ruined the birthday. I am a single parent who lost my job and I cannot deal with this.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "copy_paste_story",
+    "pattern_type": "template_script",
+    "description": "Templated formal phrasing matching known refund-fraud scripts with no product-specific detail.",
+    "example_claim": "I am writing to inform you that as per your policy I demand a full refund of consumer rights. Please advise of next steps.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "new_account_burst",
+    "pattern_type": "new_account",
+    "description": "New account places a high-value first order and files a claim immediately.",
+    "example_claim": "This is my first order. I just signed up as a new customer and the item is already defective.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "international_redirect",
+    "pattern_type": "export_redirect",
+    "description": "Shipment to a freight forwarder followed by a refund claim after the goods left the country.",
+    "example_claim": "Please send it through my forwarding service / shipping agent. I use an international reshipping freight forwarder.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "bulk_order_return",
+    "pattern_type": "selective_keep",
+    "description": "Many variants ordered, most returned, sometimes substituted.",
+    "example_claim": "I ordered multiple different sizes and bought several. I am returning the rest and keeping one.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "seasonal_scam",
+    "pattern_type": "event_wardrobing",
+    "description": "Return filed immediately after a holiday or event for an item showing single-use wear.",
+    "example_claim": "It was a holiday gift for a Christmas party and wedding event. I am returning it after the prom.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "review_extortion",
+    "pattern_type": "reputation_threat",
+    "description": "Negative-review or social-media threats linked directly to a refund demand.",
+    "example_claim": "I will leave a one star negative review and tell everyone on social media. I will expose you to the BBB unless I get a refund.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "price_drop_abuse",
+    "pattern_type": "price_match_abuse",
+    "description": "Defect claimed immediately after a price drop to repurchase cheaper.",
+    "example_claim": "The price dropped and it is on sale now. I want a price match because it is cheaper now and just went on sale.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "return_window_abuse",
+    "pattern_type": "deadline_manipulation",
+    "description": "Narrative designed to reopen an expired return window.",
+    "example_claim": "I never got a chance because I was traveling. I just opened it and only now noticed the issue. I tried to contact earlier.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "pattern_id": "stolen_credit_card",
+    "pattern_type": "payment_fraud",
+    "description": "Rush shipping and refund to a different payment method after a compromised-card purchase.",
+    "example_claim": "Please expedite overnight with the fastest shipping. Refund to a different card / new payment method.",
+    "source_type": "synthetic",
+    "source_reference": "aegis-mvp-synthetic-library",
+    "created_at": "2026-08-01T00:00:00Z"
+  }
+]

@@ -1,0 +1,732 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Aegis Swarm - serverless return-fraud detection agents. The upload service
+  (owned by another team) puts an evidence photo in its own S3 bucket and calls
+  POST /claims. A Step Functions workflow then runs the visual and
+  claim-intelligence agents in parallel on Bedrock and aggregates one verdict.
+
+Parameters:
+  EvidenceBucketName:
+    Type: String
+    Description: >-
+      REQUIRED. Name of the existing S3 bucket the upload service writes evidence
+      photos into. This stack only ever reads from it and never creates it.
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+    ConstraintDescription: Must be a valid existing S3 bucket name.
+
+  EvidenceKeyPrefix:
+    Type: String
+    Default: uploads/
+    Description: >-
+      Key prefix the upload service writes under. Both the IAM read grant and
+      request validation are scoped to it. Use an empty value to allow any key in
+      the bucket (not recommended).
+
+  EvidenceKmsKeyArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional. If the evidence bucket uses SSE-KMS with a customer-managed key,
+      put the key ARN here or reads will fail with AccessDenied. Leave empty for
+      SSE-S3 or the default AWS-managed key.
+
+  AllowedOrigin:
+    Type: String
+    Default: "*"
+    Description: >-
+      Origin allowed to call this API, e.g. https://claims.example.com. Use * only
+      while developing.
+
+  HiveSecretName:
+    Type: String
+    Default: hive-api-key-1
+    Description: >-
+      Name of the Secrets Manager secret holding the Hive V3 Secret Key
+      (Playground: Service API Keys). Agent 1 sends Authorization: Bearer <key>
+      and reads fields named api_key, "api key", or Secret Key. Lambda uses
+      IAM GetSecretValue — not the localhost:2773 Secrets Manager Agent.
+
+  BedrockInferenceProfileId:
+    Type: String
+    Default: us.amazon.nova-pro-v1:0
+    Description: >-
+      Cross-region inference profile ID used for invocation. Nova models reject
+      the bare foundation-model ID for on-demand throughput.
+
+  BedrockFoundationModelId:
+    Type: String
+    Default: amazon.nova-pro-v1:0
+    Description: >-
+      Foundation model behind the inference profile. Used only to scope IAM to
+      the regions the profile can route to.
+
+  BedrockEmbeddingModelId:
+    Type: String
+    Default: amazon.titan-embed-text-v2:0
+    Description: Titan embedding model used by the claim agent for vector retrieval.
+
+  OpenSearchEndpoint:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional OpenSearch or OpenSearch Serverless endpoint for Agent 2. Leave
+      empty to use the in-memory vector index over bundled synthetic documents.
+
+  OpenSearchIndexName:
+    Type: String
+    Default: aegis-fraud-patterns
+    Description: Index name containing fraud-pattern documents and knn_vector embeddings.
+
+  ClaimTtlDays:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    Description: >-
+      Days before a claim auto-deletes. 0 keeps claims forever, which is usually
+      what you want for fraud records.
+
+  ApiRateLimit:
+    Type: Number
+    Default: 20
+    Description: Steady-state requests per second allowed per API key.
+
+  ApiDailyQuota:
+    Type: Number
+    Default: 5000
+    Description: Requests per day allowed per API key. Caps runaway Bedrock spend.
+
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    Description: CloudWatch log retention. Lambda defaults to never expiring.
+
+  ConfidenceThreshold:
+    Type: Number
+    Default: 0.80
+    MinValue: 0.5
+    MaxValue: 0.99
+    Description: >-
+      Agent 6 auto-decides FRAUD (deny) or NOT_FRAUD (allow refund) when
+      decision confidence is at or above this value. Below it, human review.
+
+Conditions:
+  HasEvidenceKmsKey: !Not [!Equals [!Ref EvidenceKmsKeyArn, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures:
+      - x86_64
+    CodeUri: src/
+    Timeout: 15
+    MemorySize: 512
+    Environment:
+      Variables:
+        LOG_LEVEL: !Ref LogLevel
+        ALLOWED_ORIGIN: !Ref AllowedOrigin
+        # Kept below every Lambda timeout so botocore reports a timeout before
+        # the runtime is killed.
+        BEDROCK_READ_TIMEOUT: 50
+
+Resources:
+  # ---------------------------------------------------------------- storage --
+  # The evidence bucket is NOT defined here: it belongs to the upload service.
+  # Only the claims table is ours. Retained on stack deletion because fraud
+  # decisions outlive the infrastructure that produced them.
+  ClaimsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: review_status
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: review-status-index
+          KeySchema:
+            - AttributeName: review_status
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # -------------------------------------------------------------------- api --
+  AegisApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Auth:
+        ApiKeyRequired: true
+        # Browsers never send custom headers on a CORS preflight, so requiring
+        # x-api-key on OPTIONS makes every cross-origin request fail with 403.
+        AddApiKeyRequiredToCorsPreflight: false
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          Description: !Sub "Rate and quota limits for ${AWS::StackName}"
+          Throttle:
+            RateLimit: !Ref ApiRateLimit
+            BurstLimit: !Ref ApiRateLimit
+          Quota:
+            Limit: !Ref ApiDailyQuota
+            Period: DAY
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,x-api-key'"
+        AllowOrigin: !Sub "'${AllowedOrigin}'"
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingRateLimit: !Ref ApiRateLimit
+          ThrottlingBurstLimit: !Ref ApiRateLimit
+
+  # ---------------------------------------------------------- claim intake ---
+  IntakeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-intake"
+      Handler: api_intake.handler.lambda_handler
+      Timeout: 20
+      MemorySize: 512
+      Environment:
+        Variables:
+          EVIDENCE_BUCKET: !Ref EvidenceBucketName
+          EVIDENCE_KEY_PREFIX: !Ref EvidenceKeyPrefix
+          EVIDENCE_PREFIX: !Ref EvidenceKeyPrefix
+          DYNAMODB_TABLE: !Ref ClaimsTable
+          STATE_MACHINE_ARN: !Ref ClaimAnalysisWorkflow
+          CLAIM_TTL_DAYS: !Ref ClaimTtlDays
+      Policies:
+        - Statement:
+            # HeadObject is authorized by s3:GetObject — S3 has no s3:HeadObject IAM action.
+            # Intake and the visual agent have SEPARATE roles; granting this to intake
+            # does not grant Agent 1 access. The bucket policy (if any) must allow both.
+            - Sid: ConfirmEvidenceUploaded
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub "arn:${AWS::Partition}:s3:::${EvidenceBucketName}/${EvidenceKeyPrefix}*"
+            - Sid: CreateClaimRecord
+              Effect: Allow
+              Action: dynamodb:PutItem
+              Resource: !GetAtt ClaimsTable.Arn
+            - Sid: StartAnalysisWorkflow
+              Effect: Allow
+              Action: states:StartExecution
+              Resource: !Ref ClaimAnalysisWorkflow
+        - !If
+          - HasEvidenceKmsKey
+          - Statement:
+              - Sid: DecryptEvidenceMetadata
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Ref EvidenceKmsKeyArn
+          - !Ref AWS::NoValue
+      Events:
+        CreateClaim:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AegisApi
+            Path: /claims
+            Method: POST
+
+  IntakeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-intake"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ------------------------------------------------------------ results api --
+  ResultsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-results"
+      Handler: api_results.handler.lambda_handler
+      Timeout: 15
+      MemorySize: 512
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref ClaimsTable
+      Policies:
+        - Statement:
+            - Sid: ReadClaimItems
+              Effect: Allow
+              Action: dynamodb:Query
+              Resource: !GetAtt ClaimsTable.Arn
+      Events:
+        GetResults:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AegisApi
+            Path: /results/{claimId}
+            Method: GET
+
+  ResultsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-results"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ----------------------------------------------------------- analyze api --
+  # Frontend contract: POST /analyze starts Agent 1 + Agent 3 in parallel via
+  # the existing state machine; GET /analyze/{caseId} returns Agent 6's public
+  # decision. API Gateway cannot wait the full agent runtime (29s cap), so the
+  # client polls until status is completed or pending_human_review.
+  AnalyzeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-analyze"
+      Handler: api_analyze.handler.lambda_handler
+      Timeout: 20
+      MemorySize: 512
+      Environment:
+        Variables:
+          EVIDENCE_BUCKET: !Ref EvidenceBucketName
+          EVIDENCE_KEY_PREFIX: !Ref EvidenceKeyPrefix
+          EVIDENCE_PREFIX: !Ref EvidenceKeyPrefix
+          DYNAMODB_TABLE: !Ref ClaimsTable
+          STATE_MACHINE_ARN: !Ref ClaimAnalysisWorkflow
+          CLAIM_TTL_DAYS: !Ref ClaimTtlDays
+          CONFIDENCE_THRESHOLD: !Ref ConfidenceThreshold
+      Policies:
+        - Statement:
+            - Sid: ConfirmEvidenceUploaded
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub "arn:${AWS::Partition}:s3:::${EvidenceBucketName}/${EvidenceKeyPrefix}*"
+            - Sid: CreateClaimRecord
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:Query
+              Resource: !GetAtt ClaimsTable.Arn
+            - Sid: StartAnalysisWorkflow
+              Effect: Allow
+              Action: states:StartExecution
+              Resource: !Ref ClaimAnalysisWorkflow
+        - !If
+          - HasEvidenceKmsKey
+          - Statement:
+              - Sid: DecryptEvidenceMetadata
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Ref EvidenceKmsKeyArn
+          - !Ref AWS::NoValue
+      Events:
+        PostAnalyze:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AegisApi
+            Path: /analyze
+            Method: POST
+        GetAnalyze:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AegisApi
+            Path: /analyze/{caseId}
+            Method: GET
+        PostAnalyzeAlias:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AegisApi
+            Path: /api/analyze
+            Method: POST
+        GetAnalyzeAlias:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AegisApi
+            Path: /api/analyze/{caseId}
+            Method: GET
+
+  AnalyzeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-analyze"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ----------------------------------------------------------- reviews api --
+  ReviewsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-reviews"
+      Handler: api_reviews.handler.lambda_handler
+      Timeout: 15
+      MemorySize: 512
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref ClaimsTable
+          REVIEW_INDEX_NAME: review-status-index
+      Policies:
+        - Statement:
+            - Sid: ReadReviews
+              Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:GetItem
+              Resource:
+                - !GetAtt ClaimsTable.Arn
+                - !Sub "${ClaimsTable.Arn}/index/review-status-index"
+            - Sid: RecordHumanDecision
+              Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource: !GetAtt ClaimsTable.Arn
+      Events:
+        ListPending:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AegisApi
+            Path: /reviews/pending
+            Method: GET
+        ListPendingAlias:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AegisApi
+            Path: /api/reviews/pending
+            Method: GET
+        GetReview:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AegisApi
+            Path: /reviews/{caseId}
+            Method: GET
+        PostDecision:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AegisApi
+            Path: /reviews/{caseId}/decision
+            Method: POST
+        PostDecisionAlias:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AegisApi
+            Path: /api/reviews/{caseId}/decision
+            Method: POST
+
+  ReviewsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-reviews"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ------------------------------------------------- agent: visual evidence --
+  # 2048 MB is a latency choice as much as a memory one: Lambda scales CPU with
+  # memory, and the Pillow resize is CPU-bound. Timeout covers Hive (20s) plus
+  # two Bedrock vision calls, since a non-JSON response triggers one retry.
+  VisualAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-agent-visual"
+      Handler: agent_visual.handler.lambda_handler
+      Timeout: 180
+      MemorySize: 2048
+      Environment:
+        Variables:
+          EVIDENCE_BUCKET: !Ref EvidenceBucketName
+          EVIDENCE_KEY_PREFIX: !Ref EvidenceKeyPrefix
+          EVIDENCE_PREFIX: !Ref EvidenceKeyPrefix
+          DYNAMODB_TABLE: !Ref ClaimsTable
+          BEDROCK_MODEL_ID: !Ref BedrockInferenceProfileId
+          HIVE_SECRET_ID: !Ref HiveSecretName
+          HIVE_SYNC_URL: "https://api.thehive.ai/api/v3/hive/ai-generated-and-deepfake-content-detection"
+          CLAIM_TTL_DAYS: !Ref ClaimTtlDays
+      Policies:
+        - Statement:
+            - Sid: ReadEvidencePhoto
+              Effect: Allow
+              Action: s3:GetObject
+              # Independent of the intake role. Agent 1 downloads with this grant only.
+              Resource: !Sub "arn:${AWS::Partition}:s3:::${EvidenceBucketName}/${EvidenceKeyPrefix}*"
+            - Sid: WriteAgentResult
+              Effect: Allow
+              Action: dynamodb:PutItem
+              Resource: !GetAtt ClaimsTable.Arn
+            - Sid: ReadHiveApiKey
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${HiveSecretName}-*"
+            - Sid: InvokeNovaViaInferenceProfile
+              Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockInferenceProfileId}"
+                - !Sub "arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/${BedrockFoundationModelId}"
+                - !Sub "arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/${BedrockFoundationModelId}"
+                - !Sub "arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/${BedrockFoundationModelId}"
+            - Sid: AnalyzeEvidenceWithRekognition
+              Effect: Allow
+              Action:
+                - rekognition:DetectLabels
+                - rekognition:DetectText
+                - rekognition:DetectModerationLabels
+                - rekognition:DetectFaces
+              Resource: "*"
+        - !If
+          - HasEvidenceKmsKey
+          - Statement:
+              - Sid: DecryptEvidencePhoto
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Ref EvidenceKmsKeyArn
+          - !Ref AWS::NoValue
+
+  VisualAgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-agent-visual"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # --------------------------------------------- agent: claim intelligence --
+  # Needs no S3 access at all: the fraud pattern library ships in the package.
+  ClaimAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-agent-claim"
+      Handler: agent_claim.handler.lambda_handler
+      Timeout: 120
+      MemorySize: 1024
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref ClaimsTable
+          BEDROCK_MODEL_ID: !Ref BedrockInferenceProfileId
+          BEDROCK_EMBEDDING_MODEL_ID: !Ref BedrockEmbeddingModelId
+          OPENSEARCH_ENDPOINT: !Ref OpenSearchEndpoint
+          OPENSEARCH_INDEX: !Ref OpenSearchIndexName
+          CLAIM_TTL_DAYS: !Ref ClaimTtlDays
+      Policies:
+        - Statement:
+            - Sid: WriteAgentResult
+              Effect: Allow
+              Action: dynamodb:PutItem
+              Resource: !GetAtt ClaimsTable.Arn
+            - Sid: InvokeNovaViaInferenceProfile
+              Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockInferenceProfileId}"
+                - !Sub "arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/${BedrockFoundationModelId}"
+                - !Sub "arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/${BedrockFoundationModelId}"
+                - !Sub "arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/${BedrockFoundationModelId}"
+            - Sid: EmbedWithTitan
+              Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockEmbeddingModelId}"
+
+  ClaimAgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-agent-claim"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ------------------------------------------------------------- aggregator --
+  AggregateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-aggregate"
+      Handler: agent_aggregate.handler.lambda_handler
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref ClaimsTable
+          EVIDENCE_BUCKET: !Ref EvidenceBucketName
+          CLAIM_TTL_DAYS: !Ref ClaimTtlDays
+          BEDROCK_MODEL_ID: !Ref BedrockInferenceProfileId
+          CONFIDENCE_THRESHOLD: !Ref ConfidenceThreshold
+          VISUAL_WEIGHT: "0.60"
+          CLAIM_WEIGHT: "0.40"
+          REVIEW_INDEX_NAME: review-status-index
+      Policies:
+        - Statement:
+            - Sid: WriteVerdictAndReview
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+              Resource: !GetAtt ClaimsTable.Arn
+            - Sid: UpdateClaimStatus
+              Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource: !GetAtt ClaimsTable.Arn
+            - Sid: InvokeNovaForAgent6Explanation
+              Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockInferenceProfileId}"
+                - !Sub "arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/${BedrockFoundationModelId}"
+                - !Sub "arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/${BedrockFoundationModelId}"
+                - !Sub "arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/${BedrockFoundationModelId}"
+
+  AggregateLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-aggregate"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # --------------------------------------------------------------- workflow --
+  # Each branch catches its own failure and returns a failed marker, so the
+  # aggregator always runs and one agent's outage cannot discard the other's
+  # work. Retry is States.ALL because the agent handlers only raise for
+  # transient conditions; terminal problems return normally.
+  ClaimAnalysisWorkflow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "${AWS::StackName}-claim-analysis"
+      Type: STANDARD
+      DefinitionSubstitutions:
+        VisualAgentArn: !GetAtt VisualAgentFunction.Arn
+        ClaimAgentArn: !GetAtt ClaimAgentFunction.Arn
+        AggregateArn: !GetAtt AggregateFunction.Arn
+      Definition:
+        Comment: Run both fraud agents in parallel, then aggregate their verdicts.
+        StartAt: RunAgents
+        States:
+          RunAgents:
+            Type: Parallel
+            Next: Aggregate
+            Branches:
+              - StartAt: VisualAgent
+                States:
+                  VisualAgent:
+                    Type: Task
+                    Resource: arn:aws:states:::lambda:invoke
+                    Parameters:
+                      FunctionName: "${VisualAgentArn}"
+                      Payload:
+                        claim_id.$: "$$.Execution.Input.claim_id"
+                        claim.$: "$$.Execution.Input.claim"
+                        evidence.$: "$$.Execution.Input.evidence"
+                        s3_key.$: "$$.Execution.Input.s3_key"
+                        s3_keys.$: "$$.Execution.Input.s3_keys"
+                        product_category.$: "$$.Execution.Input.product_category"
+                        customer_claimed_condition.$: "$$.Execution.Input.customer_claimed_condition"
+                    OutputPath: "$.Payload"
+                    TimeoutSeconds: 210
+                    Retry:
+                      - ErrorEquals: ["States.ALL"]
+                        IntervalSeconds: 3
+                        MaxAttempts: 3
+                        BackoffRate: 2
+                    Catch:
+                      - ErrorEquals: ["States.ALL"]
+                        ResultPath: "$.error"
+                        Next: VisualUnavailable
+                    End: true
+                  VisualUnavailable:
+                    Type: Pass
+                    Parameters:
+                      agent: visual
+                      status: failed
+                      result: null
+                      error.$: "States.JsonToString($.error)"
+                    End: true
+              - StartAt: ClaimAgent
+                States:
+                  ClaimAgent:
+                    Type: Task
+                    Resource: arn:aws:states:::lambda:invoke
+                    Parameters:
+                      FunctionName: "${ClaimAgentArn}"
+                      Payload:
+                        claim_id.$: "$$.Execution.Input.claim_id"
+                        claim.$: "$$.Execution.Input.claim"
+                        product_category.$: "$$.Execution.Input.product_category"
+                        customer_claimed_condition.$: "$$.Execution.Input.customer_claimed_condition"
+                        customer_text.$: "$$.Execution.Input.customer_text"
+                        order_value_usd.$: "$$.Execution.Input.order_value_usd"
+                    OutputPath: "$.Payload"
+                    TimeoutSeconds: 150
+                    Retry:
+                      - ErrorEquals: ["States.ALL"]
+                        IntervalSeconds: 3
+                        MaxAttempts: 3
+                        BackoffRate: 2
+                    Catch:
+                      - ErrorEquals: ["States.ALL"]
+                        ResultPath: "$.error"
+                        Next: ClaimUnavailable
+                    End: true
+                  ClaimUnavailable:
+                    Type: Pass
+                    Parameters:
+                      agent: claim
+                      status: failed
+                      result: null
+                      error.$: "States.JsonToString($.error)"
+                    End: true
+          Aggregate:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: "${AggregateArn}"
+              Payload:
+                claim_id.$: "$$.Execution.Input.claim_id"
+                claim.$: "$$.Execution.Input.claim"
+                evidence.$: "$$.Execution.Input.evidence"
+                s3_key.$: "$$.Execution.Input.s3_key"
+                s3_keys.$: "$$.Execution.Input.s3_keys"
+                customer_text.$: "$$.Execution.Input.customer_text"
+                message.$: "$$.Execution.Input.customer_text"
+                results.$: "$"
+            OutputPath: "$.Payload"
+            TimeoutSeconds: 90
+            Retry:
+              - ErrorEquals: ["States.ALL"]
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            End: true
+      Policies:
+        - Statement:
+            - Sid: InvokeAgentFunctions
+              Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource:
+                - !GetAtt VisualAgentFunction.Arn
+                - !GetAtt ClaimAgentFunction.Arn
+                - !GetAtt AggregateFunction.Arn
+
+Outputs:
+  ApiUrl:
+    Description: Base URL for the API. Every request needs an x-api-key header.
+    Value: !Sub "https://${AegisApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+
+  ApiKeyId:
+    Description: >-
+      Retrieve the key value with:
+      aws apigateway get-api-key --api-key <this> --include-value
+    Value: !Ref AegisApiApiKey
+
+  EvidenceBucketRead:
+    Description: Bucket and prefix these agents are permitted to read.
+    Value: !Sub "s3://${EvidenceBucketName}/${EvidenceKeyPrefix}"
+
+  ClaimsTableName:
+    Description: DynamoDB table holding claims, agent results, and verdicts.
+    Value: !Ref ClaimsTable
+
+  WorkflowArn:
+    Description: Step Functions state machine running the agents.
+    Value: !Ref ClaimAnalysisWorkflow

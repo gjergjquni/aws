@@ -1,4 +1,4 @@
-import { proxyTo } from "../_lib/proxy.js";
+import { proxyTo } from "./_lib/proxy.js";
 
 export const config = {
   runtime: "edge",

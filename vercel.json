@@ -9,6 +9,14 @@
       "destination": "https://aws-s3-877791042657-us-east-1-an.s3.amazonaws.com/:path*"
     },
     {
+      "source": "/api/backend/:path*",
+      "destination": "https://q7phgdg1m5.execute-api.us-east-1.amazonaws.com/Prod/:path*"
+    },
+    {
+      "source": "/api/agent/:path*",
+      "destination": "/api/agent?__path=/:path*"
+    },
+    {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }

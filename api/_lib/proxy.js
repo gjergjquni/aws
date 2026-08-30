@@ -33,13 +33,22 @@ export async function proxyTo(request, { prefix, targetBase, extraHeaders = {} }
   }
 
   const url = new URL(request.url);
-  let rest = url.pathname.startsWith(prefix)
-    ? url.pathname.slice(prefix.length)
-    : url.pathname;
+  // Nested /api/backend/* and /api/agent/* are rewritten to the root
+  // function with ?__path=/rest because Vite on Vercel does not support
+  // catch-all [...path] routes.
+  const injectedPath = url.searchParams.get("__path");
+  url.searchParams.delete("__path");
+
+  let rest = injectedPath
+    ? injectedPath
+    : url.pathname.startsWith(prefix)
+      ? url.pathname.slice(prefix.length)
+      : url.pathname;
   if (!rest.startsWith("/")) rest = `/${rest}`;
   if (rest === "/") rest = "";
 
-  const target = `${base}${rest}${url.search}`;
+  const search = url.searchParams.toString();
+  const target = `${base}${rest}${search ? `?${search}` : ""}`;
   const headers = new Headers();
   const contentType = request.headers.get("content-type");
   if (contentType) headers.set("content-type", contentType);

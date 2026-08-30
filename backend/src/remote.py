@@ -1,8 +1,9 @@
 import json
 import os
-import time
-import urllib.request
 from urllib.error import HTTPError
+import urllib.request
+
+from evidence import log_event
 
 # The Agent API key lives ONLY in the backend environment (SAM parameter
 # AegisApiKey -> env AEGIS_API_KEY). Never hardcode or commit it.
@@ -12,19 +13,23 @@ JETA_BASE_URL = os.environ.get(
 )
 JETA_API_KEY = os.environ.get("AEGIS_API_KEY", "")
 
+
 def _headers():
     return {"Content-Type": "application/json", "x-api-key": JETA_API_KEY}
 
+
 def _post(url, payload):
     data = json.dumps(payload).encode()
-    req  = urllib.request.Request(url, data=data, headers=_headers())
+    req = urllib.request.Request(url, data=data, headers=_headers())
     resp = urllib.request.urlopen(req, timeout=30)
     return json.loads(resp.read())
 
+
 def _get(url):
-    req  = urllib.request.Request(url, headers=_headers())
+    req = urllib.request.Request(url, headers=_headers())
     resp = urllib.request.urlopen(req, timeout=30)
     return json.loads(resp.read())
+
 
 def proxy_request(method, path, payload=None):
     """Forward a request to the Agent API and return (status_code, body).
@@ -45,46 +50,43 @@ def proxy_request(method, path, payload=None):
             body = {"error": {"code": "upstream_error", "message": str(e)}}
         return e.code, body
 
-def call_jeta_orchestrator(claim_id, payload, endpoint_url):
-    if not endpoint_url:
-        # Stub
-        return {
-            "source":               "stub",
-            "decision":             "HUMAN_REVIEW",
-            "confidence":           0.89,
-            "reason":               "Stub: score 89.2/100",
-            "case_id":              claim_id,
-            "requires_human_review": True,
-            "final_score":          89.2
-        }
 
-    # Hapi 1 — Submit te Jeta
-    jeta_payload = {
-        "message": payload.get("customer_text", ""),
-        "s3_url":  f"s3://aws-s3-877791042657-us-east-1-an/{payload.get('s3_image_url', 'uploads/placeholder.jpg')}",
-        "case_id": claim_id,
-        "product_category": payload.get("product_category", "other"),
-        "order_value_usd":  payload.get("order_value_usd", 0)
+def build_aegis_payload(claim_id: str, payload: dict, s3_url: str) -> dict:
+    """Build the Agent API body using the exact s3_url of the uploaded object.
+
+    The key is never reconstructed. Whatever s3_url was generated at upload
+    time is what Agent 1 will download.
+    """
+    message = payload.get("customer_text") or payload.get("message") or ""
+    body = {
+        "claim_id": claim_id,
+        "s3_url": s3_url,
+        "message": message,
     }
+    if payload.get("product_category"):
+        body["product_category"] = payload["product_category"]
+    if payload.get("order_value_usd") is not None:
+        body["order_value_usd"] = payload["order_value_usd"]
+    if payload.get("customer_claimed_condition"):
+        body["customer_claimed_condition"] = payload["customer_claimed_condition"]
+    return body
 
-    submit = _post(f"{JETA_BASE_URL}/analyze", jeta_payload)
-    case_id = submit.get("case_id", claim_id)
 
-    # Hapi 2 — Poll derisa të kryhet
-    for _ in range(25):  # max ~50 sekonda
-        time.sleep(2)
-        result = _get(f"{JETA_BASE_URL}/analyze/{case_id}")
-        status = result.get("status", "processing")
-        if status != "processing":
-            result["case_id"] = case_id
-            return result
+def submit_claim_to_aegis(claim_id: str, payload: dict, s3_url: str) -> tuple[dict, dict]:
+    if not JETA_API_KEY:
+        raise RuntimeError("AEGIS_API_KEY is not configured")
 
-    # Timeout
-    return {
-        "source":               "timeout",
-        "decision":             "HUMAN_REVIEW",
-        "confidence":           0,
-        "reason":               "Orchestrator timeout — sent to human review",
-        "case_id":              case_id,
-        "requires_human_review": True
-    }
+    aegis_body = build_aegis_payload(claim_id, payload, s3_url)
+    log_event(
+        "AEGIS_CLAIM_SUBMISSION_STARTED",
+        claim_id=claim_id,
+        s3_url=s3_url,
+    )
+    submit = _post(f"{JETA_BASE_URL}/analyze", aegis_body)
+    log_event(
+        "AEGIS_CLAIM_SUBMISSION_SUCCESS",
+        claim_id=claim_id,
+        case_id=submit.get("case_id", claim_id),
+        s3_url=s3_url,
+    )
+    return submit, aegis_body

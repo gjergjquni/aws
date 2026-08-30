@@ -6,7 +6,7 @@ resolve_s3 = true
 s3_prefix = "aegis-backend"
 region = "us-east-1"
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "VisualEvidenceUrl=\"\" ClaimIntelligenceUrl=\"\""
+parameter_overrides = "VisualEvidenceUrl=\"\" ClaimIntelligenceUrl=\"\" UploadBucketName=\"aws-s3-877791042657-us-east-1-an\" UploadPrefix=\"uploads\""
 image_repositories = []
 
 [default.global.parameters]

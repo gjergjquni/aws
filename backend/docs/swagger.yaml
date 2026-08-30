@@ -15,7 +15,11 @@ paths:
           application/json:
             schema:
               type: object
+              required: [s3_url]
               properties:
+                claim_id:
+                  type: string
+                  example: "CLAIM-123"
                 customer_id:
                   type: string
                   example: "CUST-001"
@@ -24,13 +28,19 @@ paths:
                   example: "electronics"
                 order_value_usd:
                   type: number
-                  example: 999
+                  example: 299.99
                 customer_text:
                   type: string
-                  example: "I received this broken laptop yesterday. I need a refund immediately."
+                  example: "The screen arrived cracked."
+                s3_url:
+                  type: string
+                  example: "s3://aws-s3-877791042657-us-east-1-an/uploads/CLAIM-123/abc123.jpg"
+                s3_key:
+                  type: string
+                  example: "uploads/CLAIM-123/abc123.jpg"
       responses:
-        '200':
-          description: Fraud analysis result with score and recommendation
+        '202':
+          description: Claim accepted; poll GET /analyze/{case_id} for status
     get:
       summary: List claims by customer
       parameters:
@@ -67,7 +77,17 @@ paths:
               properties:
                 claim_id:
                   type: string
-                  example: "test-123"
+                  example: "CLAIM-123"
+                content_type:
+                  type: string
+                  enum: [image/jpeg, image/png]
+                  example: image/jpeg
+                filename:
+                  type: string
+                  example: "photo.jpg"
+                content_length:
+                  type: integer
+                  example: 245760
       responses:
         '200':
-          description: Presigned upload URL and S3 key
+          description: Presigned upload URL plus canonical s3_key / s3_url

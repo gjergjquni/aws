@@ -1,4 +1,3 @@
-import { AGENT_EVIDENCE_BUCKET } from "@/lib/constants";
 import type {
   AnalyzeSubmitResponse,
   CaseStatusResponse,
@@ -9,6 +8,7 @@ import type {
   ReviewDecisionResponse,
   UploadTicket,
 } from "@/types";
+import { validateEvidenceFile } from "@/utils/evidence";
 
 // All requests go through the local /api proxy (see vite.config.ts).
 // The Agent API x-api-key is attached server-side by the proxy and is
@@ -77,21 +77,32 @@ function jsonInit(method: string, body: unknown): RequestInit {
 export const claimsApi = {
   /**
    * Ask the SAM backend for a presigned S3 upload URL.
+   * The backend generates the canonical object key and s3_url once.
    */
-  async requestUploadUrl(claimId: string): Promise<UploadTicket> {
+  async requestUploadUrl(input: {
+    claimId: string;
+    file: File;
+  }): Promise<UploadTicket> {
+    const validated = validateEvidenceFile(input.file);
     return request<UploadTicket>(
       `${BACKEND_BASE}/uploads`,
-      jsonInit("POST", { claim_id: claimId }),
+      jsonInit("POST", {
+        claim_id: input.claimId,
+        content_type: validated.contentType,
+        filename: input.file.name,
+        content_length: input.file.size,
+      }),
     );
   },
 
   /**
    * Upload the evidence image directly to S3 via the presigned URL.
    * The URL is routed through the local proxy so browser CORS rules
-   * do not block the PUT. The presigned signature covers the original
-   * host/path/query, which are preserved.
+   * do not block the PUT. The PUT Content-Type must match the type
+   * that was signed (ticket.content_type).
    */
   async uploadEvidenceImage(ticket: UploadTicket, file: File): Promise<void> {
+    validateEvidenceFile(file);
     const url = new URL(ticket.upload_url);
     const proxiedUrl = `${EVIDENCE_PROXY_BASE}${url.pathname}${url.search}`;
 
@@ -99,8 +110,7 @@ export const claimsApi = {
     try {
       response = await fetch(proxiedUrl, {
         method: "PUT",
-        // The presigned URL was generated for image/jpeg specifically.
-        headers: { "Content-Type": "image/jpeg" },
+        headers: { "Content-Type": ticket.content_type },
         body: file,
       });
     } catch {
@@ -116,27 +126,20 @@ export const claimsApi = {
   },
 
   /**
-   * Start a fraud analysis. Returns HTTP 202 with the case_id used for
-   * polling.
-   *
-   * The Agent API validates that s3_url points at an EXISTING object under
-   * uploads/ in its own evidence bucket. The currently deployed upload flow
-   * presigns into a different bucket under evidence/, so keys from it cannot
-   * be referenced yet (verified against the live API). Until the backend is
-   * redeployed with an aligned upload bucket, the only object verified to
-   * exist in the Agent API bucket (uploads/test.jpg) is referenced —
-   * mirroring the existing backend fallback convention in
-   * backend/src/remote.py. Keys already under uploads/ pass through
-   * unchanged so a fixed upload flow works without frontend changes.
+   * Submit the claim to the SAM backend, which verifies the S3 object
+   * and POSTs the exact ticket s3_url to Aegis. The frontend never
+   * invents or rewrites the S3 location.
    */
   async createCase(input: CreateCaseInput): Promise<AnalyzeSubmitResponse> {
-    const s3Key =
-      input.s3Key && input.s3Key.startsWith("uploads/")
-        ? input.s3Key
-        : "uploads/test.jpg";
+    if (!input.s3Url) {
+      throw new ApiError("An evidence image is required.", 400);
+    }
     const body: Record<string, unknown> = {
+      claim_id: input.claimId,
+      customer_text: input.message,
       message: input.message,
-      s3_url: `s3://${AGENT_EVIDENCE_BUCKET}/${s3Key}`,
+      s3_url: input.s3Url,
+      s3_key: input.s3Key,
     };
     if (input.productCategory) body.product_category = input.productCategory;
     if (input.orderValueUsd !== undefined) {
@@ -144,7 +147,7 @@ export const claimsApi = {
     }
 
     return request<AnalyzeSubmitResponse>(
-      `${AGENT_BASE}/analyze`,
+      `${BACKEND_BASE}/claims`,
       jsonInit("POST", body),
     );
   },

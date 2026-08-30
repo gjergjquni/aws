@@ -20,7 +20,7 @@ export default defineConfig(({ mode }) => {
     "https://q7phgdg1m5.execute-api.us-east-1.amazonaws.com/Prod";
   const evidenceBucketUrl =
     env.AEGIS_EVIDENCE_BUCKET_URL ||
-    "https://aegis-backend-evidencebucket-iffgskhbzslo.s3.amazonaws.com";
+    "https://aws-s3-877791042657-us-east-1-an.s3.amazonaws.com";
 
   if (!agentApiKey) {
     console.warn(

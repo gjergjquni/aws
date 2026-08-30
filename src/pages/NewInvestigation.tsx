@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { caseRegistry } from "@/services/caseRegistry";
 import { claimsApi } from "@/services/claimsApi";
+import { EVIDENCE_FORMAT_ERROR, validateEvidenceFile } from "@/utils/evidence";
 
 interface SubmissionInput {
   category: string;
@@ -48,8 +49,8 @@ function stepVisual(state: StepState, index: number) {
 
 /**
  * Runs the real submission pipeline: presigned upload URL → S3 PUT →
- * POST /analyze. Every step shown corresponds to an actual request; no
- * progress is simulated.
+ * POST /claims. The S3 key is generated once by the backend and the
+ * same s3_url is sent to Aegis. Every step shown is a real request.
  */
 function SubmittingState({
   input,
@@ -60,30 +61,26 @@ function SubmittingState({
   onComplete: (caseId: string) => void;
   onBack: () => void;
 }) {
-  const [steps, setSteps] = useState<SubmissionStep[]>(() => {
-    const list: SubmissionStep[] = [];
-    if (input.imageFile) {
-      list.push({
-        key: "upload-url",
-        label: "Requesting secure upload URL",
-        description: "POST /uploads — presigned S3 URL from the backend",
-        state: "waiting",
-      });
-      list.push({
-        key: "s3-upload",
-        label: "Uploading evidence to S3",
-        description: "Direct PUT to the presigned S3 URL",
-        state: "waiting",
-      });
-    }
-    list.push({
+  const [steps, setSteps] = useState<SubmissionStep[]>(() => [
+    {
+      key: "upload-url",
+      label: "Requesting secure upload URL",
+      description: "POST /uploads — presigned S3 URL from the backend",
+      state: "waiting",
+    },
+    {
+      key: "s3-upload",
+      label: "Uploading evidence to S3",
+      description: "Direct PUT to the presigned S3 URL",
+      state: "waiting",
+    },
+    {
       key: "analyze",
       label: "Submitting case for analysis",
-      description: "POST /analyze — backend dispatches Agent 1 and Agent 3",
+      description: "POST /claims — backend verifies the object then dispatches Agent 1 and Agent 3",
       state: "waiting",
-    });
-    return list;
-  });
+    },
+  ]);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const startedRef = useRef(false);
@@ -99,26 +96,36 @@ function SubmittingState({
     };
 
     const run = async () => {
-      let s3Key: string | null = null;
-      let uploadCompletedAt: string | null = null;
+      if (!input.imageFile) {
+        setError("An evidence image is required.");
+        setSteps((prev) =>
+          prev.map((s) => (s.key === "upload-url" ? { ...s, state: "error" } : s)),
+        );
+        return;
+      }
 
       try {
-        if (input.imageFile) {
-          setStepState("upload-url", "active");
-          const ticket = await claimsApi.requestUploadUrl(crypto.randomUUID());
-          setStepState("upload-url", "done");
+        validateEvidenceFile(input.imageFile);
+        const claimId = crypto.randomUUID();
 
-          setStepState("s3-upload", "active");
-          await claimsApi.uploadEvidenceImage(ticket, input.imageFile);
-          s3Key = ticket.s3_key;
-          uploadCompletedAt = new Date().toISOString();
-          setStepState("s3-upload", "done");
-        }
+        setStepState("upload-url", "active");
+        const ticket = await claimsApi.requestUploadUrl({
+          claimId,
+          file: input.imageFile,
+        });
+        setStepState("upload-url", "done");
+
+        setStepState("s3-upload", "active");
+        await claimsApi.uploadEvidenceImage(ticket, input.imageFile);
+        const uploadCompletedAt = new Date().toISOString();
+        setStepState("s3-upload", "done");
 
         setStepState("analyze", "active");
         const submitted = await claimsApi.createCase({
+          claimId: ticket.claim_id,
           message: input.explanation,
-          s3Key,
+          s3Url: ticket.s3_url,
+          s3Key: ticket.s3_key,
           productCategory: input.category,
           orderValueUsd: input.orderValue,
         });
@@ -129,8 +136,8 @@ function SubmittingState({
           message: input.explanation,
           category: input.category,
           orderValueUsd: input.orderValue,
-          s3Key,
-          imageName: input.imageFile?.name ?? null,
+          s3Key: ticket.s3_key,
+          imageName: input.imageFile.name,
           uploadCompletedAt,
           submittedAt: new Date().toISOString(),
           lastStatus: submitted.status,
@@ -250,16 +257,38 @@ export default function NewInvestigation() {
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const handleFile = (file: File) => {
-    if (!file.type.startsWith('image/')) return;
-    const preview = URL.createObjectURL(file);
-    setImage({ file, preview });
+    try {
+      validateEvidenceFile(file);
+      const preview = URL.createObjectURL(file);
+      setImage({ file, preview });
+      setErrors((prev) => {
+        const next = { ...prev };
+        delete next.image;
+        return next;
+      });
+    } catch (err) {
+      setImage(null);
+      setErrors((prev) => ({
+        ...prev,
+        image: err instanceof Error ? err.message : EVIDENCE_FORMAT_ERROR,
+      }));
+    }
   };
 
   const validate = () => {
     const e: Record<string, string> = {};
-    if (!form.category) e.category = 'Select a product category';
-    if (!form.orderValue || isNaN(Number(form.orderValue))) e.orderValue = 'Enter a valid order value';
-    if (!form.explanation.trim() || form.explanation.length < 20) e.explanation = 'Provide a description of at least 20 characters';
+    if (!form.category) e.category = "Select a product category";
+    if (!form.orderValue || isNaN(Number(form.orderValue))) e.orderValue = "Enter a valid order value";
+    if (!form.explanation.trim() || form.explanation.length < 20) e.explanation = "Provide a description of at least 20 characters";
+    if (!image) {
+      e.image = "An evidence image is required.";
+    } else {
+      try {
+        validateEvidenceFile(image.file);
+      } catch (err) {
+        e.image = err instanceof Error ? err.message : EVIDENCE_FORMAT_ERROR;
+      }
+    }
     setErrors(e);
     return Object.keys(e).length === 0;
   };
@@ -363,8 +392,8 @@ export default function NewInvestigation() {
 
         {/* Visual Evidence */}
         <section className="bg-[var(--card)] border border-[var(--border)] rounded-[var(--radius-lg)] p-5 mb-5">
-          <h3 className="text-sm font-semibold text-[var(--foreground)] mb-1">3. Visual Evidence</h3>
-          <p className="text-xs text-[var(--muted-foreground)] mb-3">Upload return evidence. Optional but improves analysis accuracy.</p>
+          <h3 className="text-sm font-semibold text-[var(--foreground)] mb-1">3. Visual Evidence <span className="text-red-500">*</span></h3>
+          <p className="text-xs text-[var(--muted-foreground)] mb-3">Upload a JPEG or PNG of the returned item. HEIC is not supported.</p>
 
           {image ? (
             <div className="relative">
@@ -400,6 +429,7 @@ export default function NewInvestigation() {
             </div>
           )}
           <input ref={fileRef} type="file" accept="image/jpeg,image/png" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
+          {errors.image && <p className="text-xs text-red-500 mt-2">{errors.image}</p>}
         </section>
 
         {/* Privacy */}

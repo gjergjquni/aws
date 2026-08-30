@@ -38,8 +38,12 @@ export interface CaseStatusResponse {
 
 /** Response of POST /uploads on the SAM backend. */
 export interface UploadTicket {
+  claim_id: string;
   upload_url: string;
   s3_key: string;
+  bucket: string;
+  s3_url: string;
+  content_type: string;
 }
 
 /** A single finding reported by the Claim Intelligence agent. */
@@ -134,10 +138,12 @@ export interface ReviewDecisionResponse {
   reason?: string;
 }
 
-/** Input for creating a new case via POST /analyze. */
+/** Input for creating a new case via POST /claims on the SAM backend. */
 export interface CreateCaseInput {
+  claimId: string;
   message: string;
-  s3Key: string | null;
+  s3Url: string;
+  s3Key: string;
   productCategory?: string;
   orderValueUsd?: number;
 }

@@ -24,13 +24,13 @@ Parameters:
     Type: String
     Default: ""
     Description: >-
-      Optional override bucket for evidence uploads. Set this to the Agent
-      API evidence bucket (with UploadPrefix=uploads) so uploaded images can
-      actually be analyzed by Agent 1. Defaults to the stack's own bucket.
+      Evidence upload bucket. Production MUST set this to the Aegis Agent 1
+      evidence bucket so uploaded objects are the same objects Agent 1
+      downloads. Leave empty only for isolated stack-bucket testing.
   UploadPrefix:
     Type: String
-    Default: "evidence"
-    Description: Key prefix for uploaded evidence objects.
+    Default: "uploads"
+    Description: Key prefix for uploaded evidence objects. Agent 1 requires uploads/.
 
 Conditions:
   HasUploadBucket: !Not [!Equals [!Ref UploadBucketName, ""]]
@@ -103,8 +103,8 @@ Resources:
                 - s3:GetObject
               Resource: !If
                 - HasUploadBucket
-                - !Sub "arn:aws:s3:::${UploadBucketName}/*"
-                - !Sub "arn:aws:s3:::${EvidenceBucket}/*"
+                - !Sub "arn:aws:s3:::${UploadBucketName}/${UploadPrefix}/*"
+                - !Sub "arn:aws:s3:::${EvidenceBucket}/${UploadPrefix}/*"
       Events:
         SubmitClaim:
           Type: Api

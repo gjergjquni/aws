@@ -40,6 +40,12 @@ Globals:
     Timeout: 60
     Runtime: python3.13
     MemorySize: 512
+  Api:
+    Cors:
+      AllowMethods: "'GET,POST,PATCH,OPTIONS'"
+      AllowHeaders: "'Content-Type,Authorization'"
+      AllowOrigin: "'*'"
+      MaxAge: "'600'"
 
 Resources:
   ClaimsTable:

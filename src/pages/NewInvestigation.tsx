@@ -137,8 +137,10 @@ function SubmittingState({
         if (cancelled) return;
         setStepState("analyze", "done");
 
+        const caseId = submitted.case_id || submitted.claim_id || ticket.claim_id;
         caseRegistry.save({
-          caseId: submitted.case_id,
+          caseId,
+          claimId: submitted.claim_id || ticket.claim_id,
           message: input.explanation,
           category: input.category,
           orderValueUsd: input.orderValue,
@@ -149,7 +151,7 @@ function SubmittingState({
           lastStatus: submitted.status,
         });
 
-        if (!cancelled) onCompleteRef.current(submitted.case_id);
+        if (!cancelled) onCompleteRef.current(caseId);
       } catch (err) {
         if (cancelled || abort.signal.aborted) return;
         setSteps((prev) =>

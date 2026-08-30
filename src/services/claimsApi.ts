@@ -15,10 +15,9 @@ import type {
 } from "@/types";
 import { validateEvidenceFile } from "@/utils/evidence";
 
-// All requests go through the local /api proxy (see vite.config.ts).
-// The Agent API x-api-key is attached server-side by the proxy and is
-// never present in browser code.
-const AGENT_BASE = "/api/agent";
+// All live case traffic goes through the SAM backend proxy
+// (/api/backend). The backend attaches the Agent API key server-side.
+// /api/evidence is only used for the presigned S3 PUT.
 const BACKEND_BASE = "/api/backend";
 const EVIDENCE_PROXY_BASE = "/api/evidence";
 
@@ -120,6 +119,91 @@ function jsonInit(method: string, body: unknown): RequestInit {
     method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function pickString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
+
+function pickNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Map a DynamoDB claim record (GET /claims/{id}) into the shape the
+ * live case UI expects from GET /analyze/{id}.
+ */
+function mapClaimRecordToStatus(
+  item: Record<string, unknown>,
+  fallbackId: string,
+): CaseStatusResponse {
+  const orch = asRecord(item.orchestrator_result);
+  const orchStatus = pickString(orch.status);
+  const storedStatus = pickString(item.status);
+  const decision = pickString(item.decision, orch.decision);
+
+  let status: string;
+  if (
+    orchStatus === "processing" ||
+    orchStatus === "completed" ||
+    orchStatus === "pending_human_review" ||
+    orchStatus === "failed"
+  ) {
+    status = orchStatus;
+  } else if (storedStatus === "pending" || item.requires_human_review === true) {
+    status = "pending_human_review";
+  } else if (
+    storedStatus === "approved" ||
+    storedStatus === "rejected" ||
+    decision === "FRAUD" ||
+    decision === "NOT_FRAUD"
+  ) {
+    status = "completed";
+  } else {
+    status = "processing";
+  }
+
+  return {
+    status,
+    case_id:
+      pickString(item.case_id, item.claim_id, orch.case_id) ?? fallbackId,
+    decision,
+    confidence: pickNumber(item.confidence, orch.confidence),
+    reason: pickString(item.explanation, orch.reason, orch.message),
+    requires_human_review: Boolean(item.requires_human_review),
+    human_decision:
+      pickString(item.human_decision, orch.human_decision) ?? null,
+    message: pickString(orch.message, item.explanation),
+  };
+}
+
+function mapClaimRecordToReview(item: Record<string, unknown>): ReviewCase {
+  const orch = asRecord(item.orchestrator_result);
+  return {
+    case_id: pickString(item.case_id, item.claim_id) ?? "",
+    status: pickString(item.status, orch.status),
+    message: pickString(item.explanation, orch.message, orch.reason),
+    s3_url: pickString(item.s3_url),
+    confidence: pickNumber(item.confidence, orch.confidence),
+    reason: pickString(item.explanation, orch.reason),
+    created_at: pickString(item.created_at),
+    human_decision: pickString(item.human_decision) ?? null,
+    agent_6_result: Object.keys(orch).length
+      ? (orch as ReviewCase["agent_6_result"])
+      : null,
   };
 }
 
@@ -231,24 +315,63 @@ export const claimsApi = {
   },
 
   /**
-   * Poll the current status of a case. While agents are working this
-   * returns { status: "processing" }; terminal states are "completed",
-   * "pending_human_review" and "failed".
+   * Poll the current status of a case via the SAM backend.
+   * GET /analyze is preferred (live Agent API). If that 404s, fall back
+   * to the DynamoDB claim record so a just-submitted case still loads.
    */
-  async getCaseStatus(caseId: string): Promise<CaseStatusResponse> {
-    return request<CaseStatusResponse>(
-      `${AGENT_BASE}/analyze/${encodeURIComponent(caseId)}`,
-    );
+  async getCaseStatus(
+    caseId: string,
+    extraIds: string[] = [],
+  ): Promise<CaseStatusResponse> {
+    const ids = [...new Set([caseId, ...extraIds.filter(Boolean)])];
+    let analyzeError: unknown;
+
+    for (const id of ids) {
+      try {
+        return await request<CaseStatusResponse>(
+          `${BACKEND_BASE}/analyze/${encodeURIComponent(id)}`,
+        );
+      } catch (err) {
+        if (!(err instanceof ApiError) || err.status !== 404) throw err;
+        analyzeError = err;
+      }
+    }
+
+    for (const id of ids) {
+      try {
+        const claim = await request<Record<string, unknown>>(
+          `${BACKEND_BASE}/claims/${encodeURIComponent(id)}`,
+        );
+        return mapClaimRecordToStatus(claim, caseId);
+      } catch (err) {
+        if (!(err instanceof ApiError) || err.status !== 404) throw err;
+      }
+    }
+
+    throw analyzeError instanceof ApiError
+      ? analyzeError
+      : new ApiError("Case not found on the backend.", 404);
   },
 
   /**
    * List cases waiting for human review (Admin page).
    */
   async getPendingReviews(): Promise<ReviewCase[]> {
-    const data = await request<PendingReviewsResponse>(
-      `${AGENT_BASE}/reviews/pending`,
+    try {
+      const data = await request<PendingReviewsResponse>(
+        `${BACKEND_BASE}/reviews/pending`,
+      );
+      if (data.cases?.length) return data.cases;
+    } catch {
+      // Agent proxy may 404; DynamoDB pending claims still show in Admin.
+    }
+
+    const fallback = await request<{ claims?: Record<string, unknown>[] }>(
+      `${BACKEND_BASE}/claims/pending`,
     );
-    return data.cases ?? [];
+    return (fallback.claims ?? [])
+      .map(mapClaimRecordToReview)
+      .filter((item) => item.case_id);
   },
 
   /**
@@ -260,7 +383,7 @@ export const claimsApi = {
     decision: ReviewDecision,
   ): Promise<ReviewDecisionResponse> {
     return request<ReviewDecisionResponse>(
-      `${AGENT_BASE}/reviews/${encodeURIComponent(caseId)}/decision`,
+      `${BACKEND_BASE}/reviews/${encodeURIComponent(caseId)}/decision`,
       jsonInit("POST", { decision }),
     );
   },

@@ -19,6 +19,7 @@ export type ReviewDecision = "FRAUD" | "NOT_FRAUD";
 export interface AnalyzeSubmitResponse {
   status: string;
   case_id: string;
+  claim_id?: string;
   poll_url?: string;
   message?: string;
 }
@@ -155,6 +156,8 @@ export interface CreateCaseInput {
  */
 export interface StoredCase {
   caseId: string;
+  /** SAM DynamoDB partition key; may differ from Aegis case_id. */
+  claimId?: string;
   message: string;
   category?: string;
   orderValueUsd?: number;

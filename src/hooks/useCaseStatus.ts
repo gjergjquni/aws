@@ -73,11 +73,14 @@ export function useCaseStatus(caseId: string | undefined): UseCaseStatusResult {
 
     const tick = async () => {
       try {
-        const res = await claimsApi.getCaseStatus(caseId);
+        const stored = caseRegistry.get(caseId);
+        const extraIds = stored?.claimId ? [stored.claimId] : [];
+        const res = await claimsApi.getCaseStatus(caseId, extraIds);
         if (cancelled()) return;
         consecutiveErrors = 0;
         setStatus(res);
         setError(null);
+        setNotFound(false);
         setLoading(false);
         recordStatus(res);
         if (res.status === "processing") {
@@ -85,22 +88,21 @@ export function useCaseStatus(caseId: string | undefined): UseCaseStatusResult {
         }
       } catch (err) {
         if (cancelled()) return;
-        if (err instanceof ApiError && err.status === 404) {
-          setNotFound(true);
-          setLoading(false);
-          return;
-        }
         consecutiveErrors += 1;
+        const is404 = err instanceof ApiError && err.status === 404;
         if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-          setError(
-            err instanceof Error
-              ? err.message
-              : "Failed to fetch case status.",
-          );
+          if (is404) setNotFound(true);
+          else {
+            setError(
+              err instanceof Error
+                ? err.message
+                : "Failed to fetch case status.",
+            );
+          }
           setLoading(false);
           return;
         }
-        // Transient failure — keep polling.
+        // Transient failure (including a fresh 404) — keep polling.
         timer = window.setTimeout(tick, CASE_POLL_INTERVAL_MS);
       }
     };
